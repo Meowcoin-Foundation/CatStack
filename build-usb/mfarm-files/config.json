@@ -1,0 +1,27 @@
+{
+    "agent": {
+        "version": "0.1.0",
+        "stats_interval": 5,
+        "watchdog_interval": 30,
+        "max_gpu_temp": 90,
+        "critical_gpu_temp": 95,
+        "max_restarts_per_window": 5,
+        "restart_window_secs": 600
+    },
+    "flight_sheet": null,
+    "oc_profile": null,
+    "miner_paths": {
+        "ccminer": "/opt/mfarm/miners/ccminer",
+        "cpuminer-opt": "/opt/mfarm/miners/cpuminer",
+        "trex": "/opt/mfarm/miners/t-rex",
+        "lolminer": "/opt/mfarm/miners/lolMiner",
+        "xmrig": "/opt/mfarm/miners/xmrig"
+    },
+    "api_ports": {
+        "ccminer": 4068,
+        "trex": 4067,
+        "lolminer": 44444,
+        "cpuminer-opt": 4048,
+        "xmrig": 44445
+    }
+}

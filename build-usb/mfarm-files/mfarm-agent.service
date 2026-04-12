@@ -1,0 +1,19 @@
+[Unit]
+Description=MFarm Mining Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mfarm/mfarm-agent.py
+Restart=always
+RestartSec=10
+WatchdogSec=120
+WorkingDirectory=/opt/mfarm
+StandardOutput=append:/var/log/mfarm/agent.log
+StandardError=append:/var/log/mfarm/agent.log
+OOMScoreAdjust=-900
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
