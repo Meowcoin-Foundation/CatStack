@@ -7,8 +7,8 @@
     "cuda": false,
     "pools": [
         {
-            "url": "xmr-us.kryptex.network:7029",
-            "user": "89eWJ7ccdVr3GHBAYsKG28eqWcn2PMWzYeFE5xtgWzg1UimfWS62Qq4VpUSQrX3vaDeMTAMhBVR885RxkLzXNkmFV9yXvcg",
+            "url": "",
+            "user": "",
             "pass": "%HOSTNAME%",
             "keepalive": true,
             "tls": false

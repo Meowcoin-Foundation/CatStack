@@ -5,10 +5,11 @@
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-SRC="/mnt/c/Source/mfarm"
+SRC="${MEOWOS_SRC:-/mnt/c/Source/mfarm}"
 IMG="/tmp/meowos.img"
 MNT="/tmp/mfarm-rootfs"
-OUTPUT="/mnt/c/Source/meowos.img"
+OUTPUT="${MEOWOS_OUTPUT:-/mnt/c/Source/meowos.img}"
+VERSION=$(cat "$SRC/VERSION" 2>/dev/null || echo "1.0.0")
 
 echo "============================================"
 echo "  MeowOS Image Builder"
@@ -31,7 +32,7 @@ which debootstrap >/dev/null 2>&1 || {
 
 # [1/7] Create 8GB image
 echo "[1/7] Creating 8GB disk image..."
-dd if=/dev/zero of="$IMG" bs=1M count=8192 status=progress
+dd if=/dev/zero of="$IMG" bs=1M count=4096 status=progress
 echo "  Image: $(ls -lh $IMG | awk '{print $5}')"
 
 # [2/7] Partition
@@ -47,7 +48,7 @@ sgdisk -p "$IMG"
 EFI_OFFSET=$((2048 * 512))
 EFI_SIZE=$((1048576 * 512))
 ROOT_OFFSET=$((1050624 * 512))
-ROOT_SIZE=$((8192 * 1048576 - ROOT_OFFSET))
+ROOT_SIZE=$((4096 * 1048576 - ROOT_OFFSET))
 
 echo "  EFI:  offset=$EFI_OFFSET sizelimit=$EFI_SIZE"
 echo "  Root: offset=$ROOT_OFFSET sizelimit=$ROOT_SIZE"
@@ -195,7 +196,7 @@ kernel.panic=10
 kernel.panic_on_oops=1
 SYSCTL
 systemctl enable systemd-networkd
-sed -i 's/PRETTY_NAME=.*/PRETTY_NAME="MeowOS 1.0"/' /etc/os-release
+sed -i 's/PRETTY_NAME=.*/PRETTY_NAME="MeowOS"/' /etc/os-release
 echo "CHROOT_SETUP_DONE"
 SETUP
 chmod +x "$MNT/tmp/setup.sh"
@@ -204,13 +205,9 @@ echo "[4/7] Done"
 
 # [5/7] MeowFarm agent + miners
 echo "[5/7] Installing MeowFarm agent + miners..."
-PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIETCncNMggVWmhKhO8ylpK2g8/czRm6TeKOEDrga8MVr benefit14snake@hotmail.com"
-echo "$PUBKEY" > "$MNT/home/miner/.ssh/authorized_keys"
-chmod 600 "$MNT/home/miner/.ssh/authorized_keys"
-chroot "$MNT" chown miner:miner /home/miner/.ssh/authorized_keys
+# SSH keys generated on first boot (no hardcoded keys in image)
 mkdir -p "$MNT/root/.ssh"
-echo "$PUBKEY" > "$MNT/root/.ssh/authorized_keys"
-chmod 600 "$MNT/root/.ssh/authorized_keys"; chmod 700 "$MNT/root/.ssh"
+chmod 700 "$MNT/root/.ssh"
 
 mkdir -p "$MNT/opt/mfarm/miners" "$MNT/etc/mfarm" "$MNT/var/log/mfarm" "$MNT/var/run/mfarm"
 
@@ -223,6 +220,12 @@ cp "$SRC/mfarm/worker/meowos-phonehome.py" "$MNT/opt/mfarm/meowos-phonehome.py"
 cp "$SRC/mfarm/worker/meowos-phonehome.service" "$MNT/etc/systemd/system/meowos-phonehome.service"
 chmod +x "$MNT/opt/mfarm/meowos-phonehome.py"
 
+# Web UI (rig-local setup wizard + monitoring dashboard)
+cp "$SRC/mfarm/worker/meowos-webui.py" "$MNT/opt/mfarm/meowos-webui.py"
+cp "$SRC/mfarm/worker/meowos-webui.html" "$MNT/opt/mfarm/meowos-webui.html"
+cp "$SRC/mfarm/worker/meowos-webui.service" "$MNT/etc/systemd/system/meowos-webui.service"
+chmod +x "$MNT/opt/mfarm/meowos-webui.py"
+
 cd /tmp && tar xzf "$SRC/ccminer-patch/hiveos/ccminer-6390-v21.1.1.tar.gz" 2>/dev/null || true
 cp /tmp/ccminer "$MNT/opt/mfarm/miners/ccminer" 2>/dev/null || echo "WARN: ccminer binary not found"
 chmod +x "$MNT/opt/mfarm/miners/ccminer" 2>/dev/null || true
@@ -233,20 +236,13 @@ chmod +x "$MNT/opt/mfarm/miners/xmrig" 2>/dev/null || true
 cp "$SRC/mfarm/worker/xmrig-config.json" "$MNT/opt/mfarm/miners/xmrig-config.json" 2>/dev/null || true
 cp "$SRC/mfarm/worker/meowos-xmrig.service" "$MNT/etc/systemd/system/meowos-xmrig.service" 2>/dev/null || true
 
-cp /mnt/c/Users/benef/libcudart12.deb "$MNT/tmp/libcudart12.deb" 2>/dev/null || echo "WARN: libcudart12.deb not found"
+cp "${MEOWOS_CUDA_DEB:-/mnt/c/Users/benef/libcudart12.deb}" "$MNT/tmp/libcudart12.deb" 2>/dev/null || echo "WARN: libcudart12.deb not found"
 chroot "$MNT" bash -c 'dpkg -i --force-depends /tmp/libcudart12.deb 2>/dev/null; rm -f /tmp/libcudart12.deb' || true
 echo '/usr/local/cuda-12.8/targets/x86_64-linux/lib' > "$MNT/etc/ld.so.conf.d/cuda-12.conf"
 chroot "$MNT" ldconfig
 
-cat > "$MNT/etc/mfarm/config.json" <<'CFG'
-{
-    "agent": {"version":"0.1.0","stats_interval":5,"watchdog_interval":30,"max_gpu_temp":90,"critical_gpu_temp":95,"max_restarts_per_window":5,"restart_window_secs":600},
-    "flight_sheet": {"name":"luckypepe-solo","coin":"LKPEPE","algo":"yescryptR32","miner":"ccminer","miner_version":"v21.1.1","pool_url":"http://192.168.68.78:9778","wallet":"luckypepe","worker":"%HOSTNAME%","password":"luckypepe123","extra_args":"--no-longpoll --timeout=30 --segwit","is_solo":true,"solo_rpc_user":"luckypepe","solo_rpc_pass":"luckypepe123","coinbase_addr":"LLhcyVdMJj7xLrTLRmhui1E4MB8AgHNB5Y"},
-    "oc_profile": null,
-    "miner_paths": {"ccminer":"/opt/mfarm/miners/ccminer","xmrig":"/opt/mfarm/miners/xmrig"},
-    "api_ports": {"ccminer":4068,"xmrig":44445}
-}
-CFG
+# Copy clean config (no hardcoded wallets/pools - user configures via web UI)
+cp "$SRC/build-usb/mfarm-files/config.json" "$MNT/etc/mfarm/config.json"
 
 cat > "$MNT/opt/mfarm/apply-oc.sh" <<'OC'
 #!/bin/bash
@@ -291,6 +287,12 @@ MARKER="/opt/mfarm/.firstboot-done"
 exec > >(tee -a "$LOG") 2>&1
 echo "=== MeowOS First-Boot ==="
 if [[ -f "$MARKER" ]]; then echo "Already done."; systemctl disable mfarm-firstboot.service; exit 0; fi
+
+# Generate SSH host keys + user keys
+echo "Generating SSH keys..."
+ssh-keygen -A
+su - miner -c 'ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519' 2>/dev/null || true
+
 echo "Expanding root partition..."
 ROOT_DEV=$(findmnt -n -o SOURCE /)
 ROOT_DISK=$(echo "$ROOT_DEV" | sed 's/[0-9]*$//')
@@ -343,12 +345,31 @@ print(json.dumps(hw,indent=2))
 systemctl enable mfarm-agent
 systemctl enable mfarm-oc.service
 systemctl enable meowos-phonehome.service
-systemctl enable meowos-xmrig.service
+systemctl enable meowos-webui.service
 systemctl start meowos-phonehome.service
+systemctl start meowos-webui.service
+
+# MOTD with setup URL
+RIG_IP=$(ip -4 addr show | grep -oP 'inet \K[0-9.]+' | grep -v '127.0.0.1' | head -1)
+cat > /etc/motd <<MOTD
+
+  __  __                 ___  ____
+ |  \/  | ___  _____   _/ _ \/ ___|
+ | |\/| |/ _ \/ _ \ \ / / | | \___ \\
+ | |  | |  __/ (_) \ V /| |_| |___) |
+ |_|  |_|\___|\___/ \_/  \___/|____/
+
+  Configure mining: http://${RIG_IP}:8888
+  SSH: miner@${RIG_IP} (password: mfarm)
+  Hostname: $(hostname)
+
+MOTD
+
 touch "$MARKER"
 systemctl disable mfarm-firstboot.service
 echo "=== MeowOS First-Boot Complete ==="
 echo "  Hostname: $(hostname)"
+echo "  Web UI: http://${RIG_IP}:8888"
 echo "  Rebooting in 10s..."
 sleep 10
 reboot
@@ -372,6 +393,16 @@ FBSVC
 
 chroot "$MNT" systemctl enable mfarm-firstboot.service
 echo "[5/7] Done"
+
+# Cleanup to reduce image size
+echo "Cleaning up to reduce image size..."
+chroot "$MNT" apt-get clean
+rm -rf "$MNT/var/lib/apt/lists/"*
+rm -rf "$MNT/usr/share/doc" "$MNT/usr/share/man"
+rm -rf "$MNT/tmp/"*
+
+# Set version in os-release
+sed -i "s/PRETTY_NAME=\"MeowOS\"/PRETTY_NAME=\"MeowOS v$VERSION\"/" "$MNT/etc/os-release"
 
 # [6/7] GRUB
 echo "[6/7] Installing GRUB..."

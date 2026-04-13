@@ -38,8 +38,6 @@ autoinstall:
   ssh:
     install-server: true
     allow-pw: true
-    authorized-keys:
-      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIETCncNMggVWmhKhO8ylpK2g8/czRm6TeKOEDrga8MVr benefit14snake@hotmail.com"
 
   # Packages to install during OS setup
   packages:

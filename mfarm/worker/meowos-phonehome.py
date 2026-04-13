@@ -83,7 +83,7 @@ def phone_home():
     if gateway:
         subnet = ".".join(gateway.split(".")[:3])
         # Try common addresses for the MeowFarm server
-        for host_part in [gateway.split(".")[-1], "78", "1"]:
+        for host_part in [gateway.split(".")[-1], "1"]:
             try:
                 url = f"http://{subnet}.{host_part}:{MEOWFARM_PORT}/api/phonehome"
                 req = urllib.request.Request(

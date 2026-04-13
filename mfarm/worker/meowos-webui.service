@@ -1,0 +1,14 @@
+[Unit]
+Description=MeowOS Web UI
+After=network-online.target mfarm-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mfarm/meowos-webui.py
+Restart=always
+RestartSec=5
+WorkingDirectory=/opt/mfarm
+
+[Install]
+WantedBy=multi-user.target
