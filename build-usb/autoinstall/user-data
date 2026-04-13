@@ -5,6 +5,10 @@ autoinstall:
   keyboard:
     layout: us
 
+  # Suppress slow journal flush during install
+  early-commands:
+    - systemctl mask systemd-journal-flush.service
+
   # Automatically use the first disk found
   storage:
     layout:
