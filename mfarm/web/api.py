@@ -304,6 +304,29 @@ def create_oc_profile(data: OcProfileCreate):
     return _oc_to_dict(OcProfile.get_by_name(db, data.name))
 
 
+class OcProfileUpdate(BaseModel):
+    core_offset: int | None = None
+    mem_offset: int | None = None
+    core_lock: int | None = None
+    mem_lock: int | None = None
+    power_limit: int | None = None
+    fan_speed: int | None = None
+    notes: str | None = None
+
+
+@router.put("/oc-profiles/{name}")
+def update_oc_profile(name: str, data: OcProfileUpdate):
+    db = get_db()
+    p = OcProfile.get_by_name(db, name)
+    if not p:
+        raise HTTPException(404, f"OC profile '{name}' not found")
+    updates = data.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(p, field, value)
+    p.save(db)
+    return _oc_to_dict(OcProfile.get_by_name(db, name))
+
+
 @router.delete("/oc-profiles/{name}")
 def delete_oc_profile(name: str):
     db = get_db()

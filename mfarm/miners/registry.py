@@ -122,6 +122,23 @@ _register(MinerDefinition(
 ))
 
 
+_register(MinerDefinition(
+    name="miniz",
+    display_name="miniZ",
+    binary_name="miniZ",
+    supported_algos=[
+        "equihash144_5", "equihash192_7", "equihash210_9",
+        "equihash125_4", "equihash150_5", "equihash96_5",
+        "beamhashiii", "ethash", "etchash", "progpow",
+        "octopus",
+    ],
+    gpu_type="nvidia",
+    api_type="miniz_http",
+    default_api_port=20000,
+    supports_solo=False,
+))
+
+
 def get_miner(name: str) -> MinerDefinition | None:
     return MINERS.get(name.lower())
 

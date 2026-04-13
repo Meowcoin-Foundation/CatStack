@@ -470,7 +470,7 @@ main { padding: 20px 24px; }
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Power Limit (W)</label><input id="oc-pl" type="number" placeholder="200" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Fan Speed (%)</label><input id="oc-fan" type="number" placeholder="auto" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div style="grid-column:1/-1;margin-top:8px">
-          <button class="btn success" onclick="createOC()">Create OC Profile</button>
+          <button id="oc-create-btn" class="btn success" onclick="createOC()">Create Profile</button>
           <span id="oc-create-result" style="margin-left:12px;font-size:13px"></span>
         </div>
       </div>
@@ -1005,7 +1005,7 @@ async function loadOcProfiles() {
       <td>${p.mem_lock != null ? p.mem_lock + ' MHz' : '-'}</td>
       <td>${p.power_limit != null ? p.power_limit + 'W' : '-'}</td>
       <td>${p.fan_speed != null ? p.fan_speed + '%' : 'auto'}</td>
-      <td style="display:flex;gap:6px"><button class="btn" onclick="applyOC('${p.name}')">Apply</button><button class="btn danger" onclick="deleteOC('${p.name}')">Delete</button></td>
+      <td style="display:flex;gap:6px"><button class="btn" onclick="applyOC('${p.name}')">Apply</button><button class="btn" onclick="editOC(${JSON.stringify(JSON.stringify(p))})">Edit</button><button class="btn danger" onclick="deleteOC('${p.name}')">Delete</button></td>
     </tr>`).join('')}
   </table>`;
 }
@@ -1046,6 +1046,65 @@ async function applyOC(name) {
     const data = await res.json();
     alert(JSON.stringify(data.results, null, 2));
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+function editOC(profileJson) {
+  const p = JSON.parse(profileJson);
+  document.getElementById('oc-name').value = p.name;
+  document.getElementById('oc-name').disabled = true;
+  document.getElementById('oc-core').value = p.core_offset ?? '';
+  document.getElementById('oc-mem').value = p.mem_offset ?? '';
+  document.getElementById('oc-core-lock').value = p.core_lock ?? '';
+  document.getElementById('oc-mem-lock').value = p.mem_lock ?? '';
+  document.getElementById('oc-pl').value = p.power_limit ?? '';
+  document.getElementById('oc-fan').value = p.fan_speed ?? '';
+  const btn = document.getElementById('oc-create-btn');
+  btn.textContent = 'Save Changes';
+  btn.onclick = () => saveOCEdit(p.name);
+  document.getElementById('oc-create-result').innerHTML = `<span style="color:var(--cyan)">Editing "${p.name}"</span>`;
+}
+
+async function saveOCEdit(name) {
+  const result = document.getElementById('oc-create-result');
+  const body = {};
+  const core = document.getElementById('oc-core').value;
+  const mem = document.getElementById('oc-mem').value;
+  const coreLock = document.getElementById('oc-core-lock').value;
+  const memLock = document.getElementById('oc-mem-lock').value;
+  const pl = document.getElementById('oc-pl').value;
+  const fan = document.getElementById('oc-fan').value;
+  if (core !== '') body.core_offset = parseInt(core);
+  if (mem !== '') body.mem_offset = parseInt(mem);
+  if (coreLock !== '') body.core_lock = parseInt(coreLock);
+  if (memLock !== '') body.mem_lock = parseInt(memLock);
+  if (pl !== '') body.power_limit = parseInt(pl);
+  if (fan !== '') body.fan_speed = parseInt(fan);
+  try {
+    const res = await fetch(`/api/oc-profiles/${name}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (res.ok) {
+      result.innerHTML = `<span style="color:var(--green)">Updated "${name}"</span>`;
+      loadOcProfiles();
+      resetOCForm();
+    } else {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--red)">${err.detail}</span>`;
+    }
+  } catch(e) { result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+function resetOCForm() {
+  document.getElementById('oc-name').value = '';
+  document.getElementById('oc-name').disabled = false;
+  document.getElementById('oc-core').value = '';
+  document.getElementById('oc-mem').value = '';
+  document.getElementById('oc-core-lock').value = '';
+  document.getElementById('oc-mem-lock').value = '';
+  document.getElementById('oc-pl').value = '';
+  document.getElementById('oc-fan').value = '';
+  const btn = document.getElementById('oc-create-btn');
+  btn.textContent = 'Create Profile';
+  btn.onclick = createOC;
+  document.getElementById('oc-create-result').innerHTML = '';
 }
 
 async function deleteOC(name) {

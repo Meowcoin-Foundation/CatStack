@@ -18,7 +18,23 @@ from datetime import datetime, timezone
 from http.client import HTTPConnection
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
+
+
+def sd_notify(state: str):
+    """Send notification to systemd (e.g. READY=1, WATCHDOG=1)."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.connect(addr)
+        sock.sendall(state.encode())
+        sock.close()
+    except Exception:
+        pass
 
 # Paths
 CONFIG_PATH = Path("/etc/mfarm/config.json")
@@ -57,7 +73,7 @@ class Config:
         self.miner_paths = {}
         self.api_ports = {
             "ccminer": 4068, "trex": 4067, "lolminer": 44444,
-            "cpuminer-opt": 4048, "xmrig": 44445,
+            "cpuminer-opt": 4048, "xmrig": 44445, "miniz": 20000,
         }
 
     def load(self):
@@ -487,11 +503,83 @@ def query_xmrig_api(port: int) -> dict | None:
         return None
 
 
+def query_miniz_api(port: int) -> dict | None:
+    """Query miniZ via its HTML telemetry page."""
+    import re as _re
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        html = resp.read().decode(errors="replace")
+        conn.close()
+
+        # Parse per-GPU rows: each GPU has data-label fields in order
+        # ID, Device Name, °C, Fan, I/s, Sol/s, Sol3h/s, Sol/W, Watt, Clocks, Shares
+        rows = _re.findall(
+            r"data-label='ID'[^>]*>(\d+)</td>"
+            r".*?data-label='&deg;C'>([^<]+)"
+            r".*?data-label='Fan Setting'>([^<]+)"
+            r".*?data-label='Sol/s'>([^<]+)"
+            r".*?data-label='Watt'>([^<]+)"
+            r".*?data-label='Shares'>([^<]+)",
+            html, _re.DOTALL,
+        )
+        gpu_stats = []
+        for gpu_id, temp, fan, sols, watt, shares in rows:
+            parts = shares.split("/")
+            gpu_stats.append({
+                "gpu_id": int(gpu_id),
+                "hashrate": float(sols),
+                "temp": int(float(temp)),
+                "fan": int(float(fan)),
+                "power": float(watt),
+                "accepted": int(parts[0]) if len(parts) > 0 else 0,
+                "rejected": int(parts[1]) if len(parts) > 1 else 0,
+            })
+
+        # Parse totals row (last Shares entry without an ID)
+        total_shares = _re.findall(r"Shares'>([^<]+)</td>", html)
+        total_acc, total_rej = 0, 0
+        if total_shares:
+            last = total_shares[-1].split("/")
+            total_acc = int(last[0]) if len(last) > 0 else 0
+            total_rej = int(last[1]) if len(last) > 1 else 0
+
+        # Total hashrate
+        total_sols = sum(g["hashrate"] for g in gpu_stats)
+
+        # Algo from header
+        algo_m = _re.search(r"data-label='algo:'>([^<]+)", html)
+        algo = algo_m.group(1).strip() if algo_m else "equihash"
+
+        # Uptime
+        uptime_m = _re.search(r"data-label='uptime:'[^>]*>\s*(\d+)\s*days?\s+(\d+):(\d+):(\d+)", html)
+        uptime_secs = 0
+        if uptime_m:
+            d, h, m, s = int(uptime_m.group(1)), int(uptime_m.group(2)), int(uptime_m.group(3)), int(uptime_m.group(4))
+            uptime_secs = d * 86400 + h * 3600 + m * 60 + s
+
+        return {
+            "hashrate": total_sols,
+            "accepted": total_acc,
+            "rejected": total_rej,
+            "algo": algo,
+            "uptime_secs": uptime_secs,
+            "hashrate_units": "Sol/s",
+            "gpu_stats": gpu_stats,
+        }
+    except Exception:
+        return None
+
+
 API_PARSERS = {
     "ccminer_tcp": query_ccminer_api,
     "trex_http": query_trex_api,
     "lolminer_http": query_lolminer_api,
     "xmrig_http": query_xmrig_api,
+    "miniz_http": query_miniz_api,
 }
 
 # Miner name to API type mapping
@@ -503,6 +591,8 @@ MINER_API_TYPES = {
     "t-rex": "trex_http",
     "lolminer": "lolminer_http",
     "xmrig": "xmrig_http",
+    "miniz": "miniz_http",
+    "miniZ": "miniz_http",
 }
 
 
@@ -590,7 +680,17 @@ class MinerManager:
         port = self.api_port
 
         # Resolve miner binary path
-        binary = self.config.miner_paths.get(miner, miner)
+        binary = self.config.miner_paths.get(miner)
+        if not binary:
+            # Try standard install path, case-insensitive on Linux
+            miners_dir = Path("/opt/mfarm/miners")
+            if miners_dir.is_dir():
+                for f in miners_dir.iterdir():
+                    if f.name.lower() == miner.lower() and f.is_file():
+                        binary = str(f)
+                        break
+            if not binary:
+                binary = miner  # fallback to bare name (PATH lookup)
 
         if miner in ("ccminer", "cpuminer-opt", "cpuminer"):
             cmd = [binary, "-a", algo]
@@ -623,6 +723,13 @@ class MinerManager:
             wallet_worker = f"{wallet}.{worker}"
             cmd = [binary, "-a", algo, "-o", pool, "-u", wallet_worker,
                    "-p", password, f"--http-host=0.0.0.0", f"--http-port={port}"]
+
+        elif miner in ("miniz", "miniZ", "miniZ"):
+            # miniZ uses --algo N,K --url wallet@pool:port --telemetry=PORT
+            algo_param = algo.replace("equihash", "").replace("_", ",")
+            cmd = [binary, "--algo", algo_param,
+                   "--url", f"{wallet}@{pool}",
+                   f"--telemetry={port}"]
 
         else:
             # Generic fallback
@@ -701,6 +808,42 @@ class MinerManager:
             _run_quiet(["nvidia-settings", "-a", f"[fan:{idx}]/GPUTargetFanSpeed={fan}"])
             log.info("  GPU %d: fan = %d%%", idx, fan)
 
+    # All known GPU miner binary names (used to kill stale processes)
+    GPU_MINER_BINARIES = [
+        "ccminer", "miniZ", "miniz", "lolMiner", "lolminer",
+        "t-rex", "trex", "gminer", "miner", "nbminer", "teamredminer",
+        "phoenixminer", "ethminer", "kawpowminer", "wildrig-multi",
+    ]
+    # CPU miner binary names (kept alive during dual mining)
+    CPU_MINER_BINARIES = ["xmrig", "cpuminer", "cpuminer-opt"]
+
+    def _kill_stale_miners(self, keep_cpu: bool = False):
+        """Kill any leftover miner processes not managed by this agent.
+
+        Args:
+            keep_cpu: If True, don't kill CPU miners (for dual mining).
+        """
+        bins_to_kill = list(self.GPU_MINER_BINARIES)
+        if not keep_cpu:
+            bins_to_kill += self.CPU_MINER_BINARIES
+
+        our_pid = self.process.pid if self.process and self.process.poll() is None else None
+
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            pid = int(proc_dir.name)
+            if pid == our_pid or pid == os.getpid():
+                continue
+            try:
+                cmdline = (proc_dir / "cmdline").read_bytes().decode(errors="replace")
+                exe_name = cmdline.split("\x00")[0].rsplit("/", 1)[-1]
+                if exe_name in bins_to_kill:
+                    log.info("Killing stale miner process: %s (PID %d)", exe_name, pid)
+                    os.kill(pid, signal.SIGKILL)
+            except (OSError, IndexError):
+                continue
+
     def start(self) -> bool:
         """Start the miner process."""
         if self.is_running():
@@ -711,6 +854,12 @@ class MinerManager:
         if not cmd:
             log.warning("No flight sheet configured, cannot start miner")
             return False
+
+        # Kill any stale miner processes before starting
+        # Keep CPU miners alive if we're starting a GPU miner (dual mining)
+        miner_name = (self.config.flight_sheet or {}).get("miner", "")
+        is_cpu_miner = miner_name in ("cpuminer-opt", "cpuminer", "xmrig")
+        self._kill_stale_miners(keep_cpu=not is_cpu_miner)
 
         self.apply_overclock()
 
@@ -831,8 +980,16 @@ class Agent:
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT, self._shutdown)
 
+        sd_notify("READY=1")
+        log.info("Agent ready, notified systemd")
+
+        wd_counter = 0
         while self.running:
             time.sleep(1)
+            wd_counter += 1
+            if wd_counter >= 30:
+                sd_notify("WATCHDOG=1")
+                wd_counter = 0
 
         log.info("Agent shutting down")
         self.miner.stop()
@@ -908,8 +1065,9 @@ class Agent:
 
         # Miner stats
         miner_stats = {}
-        if self.config.flight_sheet and self.miner.is_running():
+        if self.config.flight_sheet:
             fs = self.config.flight_sheet
+            managed = self.miner.is_running()
             api_stats = query_miner_stats(fs.get("miner", ""), self.miner.api_port)
             miner_stats = {
                 "name": fs.get("miner", ""),
@@ -917,7 +1075,7 @@ class Agent:
                 "algo": fs.get("algo", ""),
                 "pool": fs.get("pool_url", ""),
                 "pid": self.miner.get_pid(),
-                "running": self.miner.is_running(),
+                "running": managed or (api_stats is not None),
                 "restarts": self.miner.total_restarts,
             }
             if api_stats:
@@ -928,13 +1086,6 @@ class Agent:
                 for i, gs in enumerate(gpu_api):
                     if i < len(gpus):
                         gpus[i]["hashrate"] = gs.get("hashrate", 0)
-        elif self.config.flight_sheet:
-            fs = self.config.flight_sheet
-            miner_stats = {
-                "name": fs.get("miner", ""),
-                "algo": fs.get("algo", ""),
-                "running": False,
-            }
 
         # Ping GPU pool/node
         gpu_pool_ping = None

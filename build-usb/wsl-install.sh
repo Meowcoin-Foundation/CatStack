@@ -1,54 +1,82 @@
 #!/bin/bash
-#
-# MeowOS Installer v2
-# Fully hands-off: auto-login, phone-home, wildcard networking,
-# dual mining (ccminer GPU + XMRig CPU)
-#
-set -uo pipefail
+# Build MeowOS disk image using manual offsets (no partition nodes needed)
+# Works around WSL2 not supporting partition scanning on loop OR passthrough disks
+set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-# Use DISK env var if set, otherwise auto-detect largest unmounted disk
-if [ -z "${DISK:-}" ]; then
-    DISK=$(lsblk -nd -o NAME,SIZE,MOUNTPOINT --bytes | grep -v '/' | sort -k2 -rn | awk 'NR==1{print "/dev/"$1}')
-fi
-if [ -z "$DISK" ]; then echo "ERROR: No target disk found"; lsblk; exit 1; fi
-
-MNT="/tmp/mfarm-rootfs"
 SRC="/mnt/c/Source/mfarm"
+IMG="/tmp/meowos.img"
+MNT="/tmp/mfarm-rootfs"
 
 echo "============================================"
-echo "  MeowOS Installer v2"
-echo "  Target: $DISK ($(lsblk -nd -o SIZE $DISK))"
+echo "  MeowOS Image Builder (WSL2 compatible)"
 echo "============================================"
 
-# ── [1/7] Partition ──
-echo "[1/7] Partitioning..."
-umount ${DISK}* 2>/dev/null || true
-sgdisk --zap-all "$DISK"
-sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" "$DISK"
-sgdisk -n 2:0:0 -t 2:8300 -c 2:"root" "$DISK"
-sleep 2; partprobe "$DISK" 2>/dev/null || true; partx -a "$DISK" 2>/dev/null || true; sleep 3
-echo "[1/7] Done"
+# Find physical target
+TARGET=""
+for dev in /dev/sd?; do
+    [ -b "$dev" ] || continue
+    SIZE=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    if [ "$SIZE" -gt 100000000000 ] && [ "$SIZE" -lt 130000000000 ]; then
+        TARGET="$dev"
+        echo "Physical target: $dev ($((SIZE / 1073741824)) GB)"
+    fi
+done
+[ -z "$TARGET" ] && { echo "ERROR: No ~120GB disk found"; lsblk; exit 1; }
 
-# ── [2/7] Format + Mount ──
-echo "[2/7] Formatting..."
-mkfs.fat -F 32 -n MEWOS-EFI "${DISK}1"
-mkfs.ext4 -L meowos-root -F "${DISK}2"
+# Install tools
+echo "Checking tools..."
+apt-get update -qq
+apt-get install -y -qq debootstrap gdisk dosfstools e2fsprogs grub-efi-amd64-bin 2>/dev/null
+
+# [1/8] Create 8GB image
+echo "[1/8] Creating 8GB disk image..."
+rm -f "$IMG"
+truncate -s 8G "$IMG"
+
+# [2/8] Partition with fixed layout
+echo "[2/8] Partitioning..."
+sgdisk --zap-all "$IMG" >/dev/null 2>&1
+sgdisk -n 1:2048:1050623 -t 1:ef00 -c 1:"EFI" "$IMG" >/dev/null
+sgdisk -n 2:1050624:0 -t 2:8300 -c 2:"root" "$IMG" >/dev/null
+
+# Known offsets (512-byte sectors):
+#   Partition 1: start=2048, size=1048576 sectors = 512MB
+#   Partition 2: start=1050624, to end of image
+EFI_OFFSET=$((2048 * 512))          # 1048576
+EFI_SIZE=$((1048576 * 512))          # 536870912
+ROOT_OFFSET=$((1050624 * 512))       # 537919488
+
+echo "  EFI:  offset=$EFI_OFFSET size=$EFI_SIZE"
+echo "  Root: offset=$ROOT_OFFSET"
+
+# [3/8] Create loop devices at specific offsets (NO partition scanning)
+echo "[3/8] Setting up loop devices..."
+EFI_LOOP=$(losetup --find --show --offset $EFI_OFFSET --sizelimit $EFI_SIZE "$IMG")
+ROOT_LOOP=$(losetup --find --show --offset $ROOT_OFFSET "$IMG")
+echo "  EFI loop:  $EFI_LOOP"
+echo "  Root loop: $ROOT_LOOP"
+
+# Format
+echo "  Formatting..."
+mkfs.fat -F 32 -n MEWOS-EFI "$EFI_LOOP"
+mkfs.ext4 -L meowos-root -F "$ROOT_LOOP"
+echo "[3/8] Done"
+
+# [4/8] Mount + Debootstrap
+echo "[4/8] Installing base system (~3 min)..."
 mkdir -p "$MNT"
-mount "${DISK}2" "$MNT"
+mount "$ROOT_LOOP" "$MNT"
 mkdir -p "$MNT/boot/efi"
-mount "${DISK}1" "$MNT/boot/efi"
-echo "[2/7] Done"
+mount "$EFI_LOOP" "$MNT/boot/efi"
 
-# ── [3/7] Debootstrap ──
-echo "[3/7] Installing base system (~2 min)..."
 debootstrap --arch=amd64 jammy "$MNT" http://us.archive.ubuntu.com/ubuntu
-echo "[3/7] Done"
+echo "[4/8] Done"
 
-# ── [4/7] Configure ──
-echo "[4/7] Configuring system..."
-ROOT_UUID=$(blkid -s UUID -o value "${DISK}2")
-EFI_UUID=$(blkid -s UUID -o value "${DISK}1")
+# [5/8] Configure
+echo "[5/8] Configuring system..."
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_LOOP")
+EFI_UUID=$(blkid -s UUID -o value "$EFI_LOOP")
 
 cat > "$MNT/etc/fstab" <<EOF
 UUID=$ROOT_UUID   /          ext4   errors=remount-ro   0 1
@@ -65,7 +93,6 @@ echo "mfarm-rig" > "$MNT/etc/hostname"
 printf "127.0.0.1\tlocalhost\n127.0.1.1\tmfarm-rig\n" > "$MNT/etc/hosts"
 ln -sf /usr/share/zoneinfo/UTC "$MNT/etc/localtime"
 
-# Wildcard networking - match ALL ethernet interfaces
 mkdir -p "$MNT/etc/netplan"
 cat > "$MNT/etc/netplan/01-mfarm.yaml" <<'EOF'
 network:
@@ -90,11 +117,9 @@ EOF
 rm -f "$MNT/etc/resolv.conf"
 printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" > "$MNT/etc/resolv.conf"
 
-# tmpfiles.d for /var/run/mfarm
 mkdir -p "$MNT/etc/tmpfiles.d"
 echo "d /var/run/mfarm 0755 root root -" > "$MNT/etc/tmpfiles.d/mfarm.conf"
 
-# Chroot: install packages
 mount --bind /dev "$MNT/dev" 2>/dev/null || true
 mount --bind /dev/pts "$MNT/dev/pts" 2>/dev/null || true
 mount -t proc proc "$MNT/proc" 2>/dev/null || true
@@ -116,17 +141,16 @@ apt-get install -y -qq \
     dkms build-essential \
     software-properties-common ubuntu-drivers-common \
     sudo locales iproute2 iputils-ping netplan.io \
-    xserver-xorg-core xinit x11-xserver-utils
+    xserver-xorg-core xinit x11-xserver-utils \
+    cloud-guest-utils gdisk
 locale-gen en_US.UTF-8
 
-# User
 useradd -m -s /bin/bash -G sudo,video miner
 echo "miner:mfarm" | chpasswd
 echo "root:mfarm" | chpasswd
 echo 'miner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/miner
 chmod 440 /etc/sudoers.d/miner
 
-# SSH
 mkdir -p /home/miner/.ssh
 chmod 700 /home/miner/.ssh
 chown miner:miner /home/miner/.ssh
@@ -134,7 +158,6 @@ sed -i 's/#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
 sed -i 's/#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 systemctl enable ssh
 
-# Auto-login on tty1 (no monitor needed)
 mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/override.conf <<'AUTOLOGIN'
 [Service]
@@ -142,10 +165,8 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin miner --noclear %I $TERM
 AUTOLOGIN
 
-# Disable junk
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 
-# Performance
 cat > /etc/rc.local <<'RC'
 #!/bin/bash
 for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
@@ -164,17 +185,15 @@ kernel.panic=10
 kernel.panic_on_oops=1
 SYSCTL
 systemctl enable systemd-networkd
-
-# Brand as MeowOS
 sed -i 's/PRETTY_NAME=.*/PRETTY_NAME="MeowOS 1.0"/' /etc/os-release
 echo "CHROOT_SETUP_DONE"
 SETUP
 chmod +x "$MNT/tmp/setup.sh"
 chroot "$MNT" /tmp/setup.sh
-echo "[4/7] Done"
+echo "[5/8] Done"
 
-# ── [5/7] SSH + MeowFarm agent + miners ──
-echo "[5/7] Installing MeowFarm agent + miners..."
+# [6/8] MeowFarm agent + miners
+echo "[6/8] Installing MeowFarm agent + miners..."
 PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIETCncNMggVWmhKhO8ylpK2g8/czRm6TeKOEDrga8MVr benefit14snake@hotmail.com"
 echo "$PUBKEY" > "$MNT/home/miner/.ssh/authorized_keys"
 chmod 600 "$MNT/home/miner/.ssh/authorized_keys"
@@ -185,36 +204,30 @@ chmod 600 "$MNT/root/.ssh/authorized_keys"; chmod 700 "$MNT/root/.ssh"
 
 mkdir -p "$MNT/opt/mfarm/miners" "$MNT/etc/mfarm" "$MNT/var/log/mfarm" "$MNT/var/run/mfarm"
 
-# MeowFarm agent (latest with log parser + mem temp)
 cp "$SRC/mfarm/worker/mfarm-agent.py" "$MNT/opt/mfarm/mfarm-agent.py"
 cp "$SRC/mfarm/worker/miner-wrapper.sh" "$MNT/opt/mfarm/miner-wrapper.sh"
 cp "$SRC/mfarm/worker/mfarm-agent.service" "$MNT/etc/systemd/system/mfarm-agent.service"
 chmod +x "$MNT/opt/mfarm/mfarm-agent.py" "$MNT/opt/mfarm/miner-wrapper.sh"
 
-# Phone-home service
 cp "$SRC/mfarm/worker/meowos-phonehome.py" "$MNT/opt/mfarm/meowos-phonehome.py"
 cp "$SRC/mfarm/worker/meowos-phonehome.service" "$MNT/etc/systemd/system/meowos-phonehome.service"
 chmod +x "$MNT/opt/mfarm/meowos-phonehome.py"
 
-# CCminer v21.1.1 (GPU - Lucky Pepe solo)
 cd /tmp && tar xzf "$SRC/ccminer-patch/hiveos/ccminer-6390-v21.1.1.tar.gz" 2>/dev/null || true
-cp /tmp/ccminer "$MNT/opt/mfarm/miners/ccminer"
-chmod +x "$MNT/opt/mfarm/miners/ccminer"
+cp /tmp/ccminer "$MNT/opt/mfarm/miners/ccminer" 2>/dev/null || echo "WARN: ccminer binary not found"
+chmod +x "$MNT/opt/mfarm/miners/ccminer" 2>/dev/null || true
 
-# XMRig no-devfee (CPU - Kryptex pool)
 cd /tmp && tar xzf "$SRC/build-usb/mfarm-files/xmrig-nodevfee-hiveos.tar.gz" 2>/dev/null || true
-cp /tmp/xmrig-nodevfee/xmrig "$MNT/opt/mfarm/miners/xmrig"
-chmod +x "$MNT/opt/mfarm/miners/xmrig"
-cp "$SRC/mfarm/worker/xmrig-config.json" "$MNT/opt/mfarm/miners/xmrig-config.json"
-cp "$SRC/mfarm/worker/meowos-xmrig.service" "$MNT/etc/systemd/system/meowos-xmrig.service"
+cp /tmp/xmrig-nodevfee/xmrig "$MNT/opt/mfarm/miners/xmrig" 2>/dev/null || echo "WARN: xmrig binary not found"
+chmod +x "$MNT/opt/mfarm/miners/xmrig" 2>/dev/null || true
+cp "$SRC/mfarm/worker/xmrig-config.json" "$MNT/opt/mfarm/miners/xmrig-config.json" 2>/dev/null || true
+cp "$SRC/mfarm/worker/meowos-xmrig.service" "$MNT/etc/systemd/system/meowos-xmrig.service" 2>/dev/null || true
 
-# CUDA 12 runtime
-cp /mnt/c/Users/benef/libcudart12.deb "$MNT/tmp/libcudart12.deb"
-chroot "$MNT" bash -c 'dpkg -i --force-depends /tmp/libcudart12.deb 2>/dev/null; rm /tmp/libcudart12.deb'
+cp /mnt/c/Users/benef/libcudart12.deb "$MNT/tmp/libcudart12.deb" 2>/dev/null || echo "WARN: libcudart12.deb not found"
+chroot "$MNT" bash -c 'dpkg -i --force-depends /tmp/libcudart12.deb 2>/dev/null; rm -f /tmp/libcudart12.deb' || true
 echo '/usr/local/cuda-12.8/targets/x86_64-linux/lib' > "$MNT/etc/ld.so.conf.d/cuda-12.conf"
 chroot "$MNT" ldconfig
 
-# Config: dual mining (ccminer GPU + XMRig CPU)
 cat > "$MNT/etc/mfarm/config.json" <<'CFG'
 {
     "agent": {"version":"0.1.0","stats_interval":5,"watchdog_interval":30,"max_gpu_temp":90,"critical_gpu_temp":95,"max_restarts_per_window":5,"restart_window_secs":600},
@@ -225,7 +238,6 @@ cat > "$MNT/etc/mfarm/config.json" <<'CFG'
 }
 CFG
 
-# OC script
 cat > "$MNT/opt/mfarm/apply-oc.sh" <<'OC'
 #!/bin/bash
 sleep 5
@@ -256,12 +268,10 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 SVC
 
-# Logrotate
 cat > "$MNT/etc/logrotate.d/mfarm" <<'LR'
 /var/log/mfarm/*.log { daily rotate 7 compress delaycompress missingok notifempty size 50M }
 LR
 
-# First-boot script
 cat > "$MNT/opt/mfarm/mfarm-firstboot.sh" <<'FB'
 #!/bin/bash
 set -uo pipefail
@@ -271,6 +281,14 @@ MARKER="/opt/mfarm/.firstboot-done"
 exec > >(tee -a "$LOG") 2>&1
 echo "=== MeowOS First-Boot ==="
 if [[ -f "$MARKER" ]]; then echo "Already done."; systemctl disable mfarm-firstboot.service; exit 0; fi
+echo "Expanding root partition..."
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+ROOT_DISK=$(echo "$ROOT_DEV" | sed 's/[0-9]*$//')
+ROOT_PARTNUM=$(echo "$ROOT_DEV" | grep -o '[0-9]*$')
+sgdisk -e "$ROOT_DISK" 2>/dev/null || true
+growpart "$ROOT_DISK" "$ROOT_PARTNUM" 2>/dev/null || true
+resize2fs "$ROOT_DEV" 2>/dev/null || true
+echo "  Root: $(df -h / | tail -1 | awk '{print $2}')"
 for i in $(seq 1 30); do ping -c 1 -W 2 8.8.8.8 &>/dev/null && break; sleep 2; done
 apt-get update -qq
 if lspci | grep -qi nvidia; then
@@ -286,7 +304,6 @@ sensors-detect --auto >/dev/null 2>&1 || true
 MAC_SUFFIX=$(ip link show | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':' | tail -c 5)
 hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/mfarm-rig/mfarm-rig-${MAC_SUFFIX}/g" /etc/hosts
-# Update xmrig config with actual hostname
 sed -i "s/%HOSTNAME%/mfarm-rig-${MAC_SUFFIX}/g" /opt/mfarm/miners/xmrig-config.json
 nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
 mkdir -p /var/run/mfarm
@@ -344,10 +361,10 @@ WantedBy=multi-user.target
 FBSVC
 
 chroot "$MNT" systemctl enable mfarm-firstboot.service
-echo "[5/7] Done"
+echo "[6/8] Done"
 
-# ── [6/7] GRUB ──
-echo "[6/7] Installing GRUB..."
+# [7/8] GRUB
+echo "[7/8] Installing GRUB..."
 cat > "$MNT/tmp/grub-setup.sh" <<'GRUB'
 #!/bin/bash
 set -euo pipefail
@@ -365,28 +382,31 @@ echo "GRUB_DONE"
 GRUB
 chmod +x "$MNT/tmp/grub-setup.sh"
 chroot "$MNT" /tmp/grub-setup.sh
-echo "[6/7] Done"
+echo "[7/8] Done"
 
-# ── [7/7] Unmount ──
-echo "[7/7] Unmounting..."
+# Unmount image
+echo "Unmounting image..."
 umount "$MNT/dev/pts" 2>/dev/null || true
 umount "$MNT/dev" 2>/dev/null || true
 umount "$MNT/proc" 2>/dev/null || true
 umount "$MNT/sys" 2>/dev/null || true
 umount "$MNT/boot/efi" 2>/dev/null || true
 umount "$MNT" 2>/dev/null || true
+losetup -d "$EFI_LOOP" 2>/dev/null || true
+losetup -d "$ROOT_LOOP" 2>/dev/null || true
+sync
+
+# [8/8] Write image to SSD
+echo "[8/8] Writing image to $TARGET..."
+dd if="$IMG" of="$TARGET" bs=4M status=progress oflag=sync
+sync
+rm -f "$IMG"
 
 echo ""
 echo "============================================"
-echo "  MeowOS v2 Install Complete!"
+echo "  MeowOS Install Complete!"
 echo "============================================"
-echo "  User:  miner / mfarm"
-echo "  Root:  root / mfarm"
-echo "  SSH key authorized"
-echo "  Auto-login: YES"
-echo "  Phone-home: YES (UDP 8889)"
-echo "  GPU Mining: ccminer v21.1.1 (Lucky Pepe solo)"
-echo "  CPU Mining: XMRig no-devfee (Kryptex pool)"
-echo "  OC: core +100, mem +2000, lock 2600"
-echo "  First boot installs NVIDIA drivers"
+echo "  Plug SSD into rig and boot."
+echo "  First boot expands to full 120GB + installs"
+echo "  NVIDIA drivers, then starts mining."
 echo "============================================"

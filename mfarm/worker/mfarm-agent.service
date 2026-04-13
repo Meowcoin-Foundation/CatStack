@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/bin/python3 /opt/mfarm/mfarm-agent.py
 Restart=always
 RestartSec=10
