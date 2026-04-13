@@ -472,9 +472,13 @@ losetup -d "$EFI_LOOP" 2>/dev/null || true
 losetup -d "$ROOT_LOOP" 2>/dev/null || true
 sync
 
-echo "Copying image to Windows filesystem..."
-cp "$IMG" "$OUTPUT"
-rm -f "$IMG"
+if [ "$IMG" != "$OUTPUT" ]; then
+    echo "Copying image to $OUTPUT..."
+    cp "$IMG" "$OUTPUT"
+    rm -f "$IMG"
+else
+    echo "Image already at $OUTPUT"
+fi
 
 echo ""
 echo "============================================"
