@@ -66,7 +66,7 @@ try {
     Start-Sleep 2
     wsl --mount '\\.\PhysicalDrive4' --bare 2>&1
     Start-Sleep 3
-    wsl -d Ubuntu-22.04 -- sudo bash -c 'for dev in /dev/sd?; do SIZE=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0); if [ "$SIZE" -gt 100000000000 ] && [ "$SIZE" -lt 130000000000 ]; then echo "Fixing GPT on $dev"; sgdisk -e "$dev"; echo "Verifying EFI boot files..."; mkdir -p /tmp/eficheck; mount "${dev}1" /tmp/eficheck 2>/dev/null && { ls -la /tmp/eficheck/EFI/BOOT/ 2>/dev/null; umount /tmp/eficheck; } || echo "WARN: Could not mount EFI partition"; break; fi; done' 2>&1
+    wsl -d Ubuntu-22.04 -- sudo bash /mnt/c/Source/mfarm/build-usb/fix-gpt.sh 2>&1 | ForEach-Object { Write-Host $_ }
     wsl --unmount '\\.\PhysicalDrive4' 2>&1
     Set-Disk -Number 4 -IsOffline $false
 

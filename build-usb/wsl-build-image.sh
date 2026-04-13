@@ -375,23 +375,58 @@ echo "[5/7] Done"
 
 # [6/7] GRUB
 echo "[6/7] Installing GRUB..."
-cat > "$MNT/tmp/grub-setup.sh" <<'GRUB'
-#!/bin/bash
-set -euo pipefail
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable 2>&1 || echo "grub-install warning"
-cat > /etc/default/grub <<'GC'
-GRUB_DEFAULT=0
-GRUB_TIMEOUT=3
-GRUB_DISTRIBUTOR="MeowOS"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0"
-GRUB_TERMINAL="console"
-GC
-update-grub
-echo "GRUB_DONE"
-GRUB
-chmod +x "$MNT/tmp/grub-setup.sh"
-chroot "$MNT" /tmp/grub-setup.sh
+
+# Find the kernel and initrd that were installed
+KERNEL=$(ls "$MNT/boot/vmlinuz-"* 2>/dev/null | sort -V | tail -1 | xargs basename)
+INITRD=$(ls "$MNT/boot/initrd.img-"* 2>/dev/null | sort -V | tail -1 | xargs basename)
+echo "  Kernel: $KERNEL"
+echo "  Initrd: $INITRD"
+
+if [ -z "$KERNEL" ]; then
+    echo "FATAL: No kernel found in $MNT/boot/"
+    ls -la "$MNT/boot/"
+    exit 1
+fi
+
+# Install GRUB EFI binary (just copies files, no disk access needed)
+chroot "$MNT" grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable 2>&1 || {
+    echo "grub-install failed, manually copying EFI binary..."
+    mkdir -p "$MNT/boot/efi/EFI/BOOT"
+    cp "$MNT/usr/lib/grub/x86_64-efi/monolithic/grubx64.efi" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
+    cp "$MNT/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || {
+        # Build grub EFI binary from modules
+        chroot "$MNT" grub-mkimage -o /boot/efi/EFI/BOOT/BOOTX64.EFI -O x86_64-efi \
+            normal boot linux ext2 fat part_gpt search search_fs_uuid search_label
+    }
+}
+
+# Write grub.cfg MANUALLY (update-grub/grub-probe fails on loop devices)
+cat > "$MNT/boot/grub/grub.cfg" <<GRUBCFG
+set default=0
+set timeout=3
+
+menuentry "MeowOS" {
+    search --no-floppy --fs-uuid --set=root $ROOT_UUID
+    linux /$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
+    initrd /$INITRD
+}
+GRUBCFG
+
+# Also put grub.cfg on the EFI partition (some firmware looks there)
+mkdir -p "$MNT/boot/efi/EFI/BOOT"
+cp "$MNT/boot/grub/grub.cfg" "$MNT/boot/efi/EFI/BOOT/grub.cfg"
+mkdir -p "$MNT/boot/efi/boot/grub"
+cp "$MNT/boot/grub/grub.cfg" "$MNT/boot/efi/boot/grub/grub.cfg"
+
+# Verify EFI boot file exists
+if [ -f "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" ]; then
+    echo "  EFI binary: OK ($(ls -lh "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" | awk '{print $5}'))"
+else
+    echo "  FATAL: BOOTX64.EFI not found!"
+    find "$MNT/boot/efi" -type f
+    exit 1
+fi
+echo "  grub.cfg: root=UUID=$ROOT_UUID kernel=$KERNEL"
 echo "[6/7] Done"
 
 # [7/7] Finalize
