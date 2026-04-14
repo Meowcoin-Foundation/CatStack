@@ -438,8 +438,8 @@ set timeout=3
 
 menuentry "MeowOS" {
     search --no-floppy --fs-uuid --set=root $ROOT_UUID
-    linux /$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
-    initrd /$INITRD
+    linux /boot/$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
+    initrd /boot/$INITRD
 }
 GRUBCFG
 
