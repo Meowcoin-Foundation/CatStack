@@ -462,7 +462,7 @@ cat > "$MNT/boot/efi/loader/entries/meowos.conf" <<ENTRY
 title   MeowOS
 linux   /$KERNEL
 initrd  /$INITRD
-options root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0 fsck.mode=force fsck.repair=yes systemd.mask=systemd-journal-flush.service systemd.mask=systemd-journal-catalog-update.service
+options root=UUID=$ROOT_UUID rw quiet net.ifnames=0 biosdevname=0 systemd.mask=systemd-journal-flush.service
 ENTRY
 
 # Verify
