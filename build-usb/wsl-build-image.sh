@@ -450,20 +450,8 @@ set default=0
 set timeout=3
 
 menuentry "MeowOS" {
-    linux /EFI/BOOT/../../../$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
-    initrd /EFI/BOOT/../../../$INITRD
-}
-
-menuentry "MeowOS (EFI fallback)" {
-    search --no-floppy --fs-uuid --set=root $EFI_UUID
     linux /$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
     initrd /$INITRD
-}
-
-menuentry "MeowOS (ext4 root)" {
-    search --no-floppy --fs-uuid --set=root $ROOT_UUID
-    linux /boot/$KERNEL root=UUID=$ROOT_UUID ro quiet net.ifnames=0 biosdevname=0
-    initrd /boot/$INITRD
 }
 GRUBCFG
 
