@@ -42,28 +42,21 @@ sgdisk -n 1:2048:1050623 -t 1:ef00 -c 1:"EFI" "$IMG" >/dev/null
 sgdisk -n 2:1050624:0 -t 2:8300 -c 2:"root" "$IMG" >/dev/null
 sgdisk -p "$IMG"
 
-# Calculate offsets
-# EFI: sector 2048, 1048576 sectors of 512 bytes = 512MB
-# Root: sector 1050624 to end
-# Get exact partition boundaries from sgdisk (no manual math)
-EFI_START=$(sgdisk -i 1 "$IMG" 2>/dev/null | grep "First sector" | awk '{print $3}')
-EFI_END=$(sgdisk -i 1 "$IMG" 2>/dev/null | grep "Last sector" | awk '{print $3}')
-ROOT_START=$(sgdisk -i 2 "$IMG" 2>/dev/null | grep "First sector" | awk '{print $3}')
-ROOT_END=$(sgdisk -i 2 "$IMG" 2>/dev/null | grep "Last sector" | awk '{print $3}')
-
-EFI_OFFSET=$((EFI_START * 512))
-EFI_SIZE=$(( (EFI_END - EFI_START + 1) * 512 ))
-ROOT_OFFSET=$((ROOT_START * 512))
-ROOT_SIZE=$(( (ROOT_END - ROOT_START + 1) * 512 ))
+# Fixed offsets (matching sgdisk partition layout above)
+EFI_OFFSET=$((2048 * 512))
+EFI_SIZE=$((1048576 * 512))
+ROOT_OFFSET=$((1050624 * 512))
 
 echo "  EFI:  offset=$EFI_OFFSET sizelimit=$EFI_SIZE"
-echo "  Root: offset=$ROOT_OFFSET sizelimit=$ROOT_SIZE"
+echo "  Root: offset=$ROOT_OFFSET (no sizelimit - will resize2fs after)"
 
 # Set up loop devices
+# EFI: needs sizelimit (fixed 512MB)
+# Root: NO sizelimit - filesystem created at full loop size, then shrunk to fit partition
 echo "  Setting up loop devices..."
 EFI_LOOP=$(losetup --find --show --offset "$EFI_OFFSET" --sizelimit "$EFI_SIZE" "$IMG")
 echo "  EFI loop: $EFI_LOOP"
-ROOT_LOOP=$(losetup --find --show --offset "$ROOT_OFFSET" --sizelimit "$ROOT_SIZE" "$IMG")
+ROOT_LOOP=$(losetup --find --show --offset "$ROOT_OFFSET" "$IMG")
 echo "  Root loop: $ROOT_LOOP"
 
 # Verify they're block devices
@@ -484,6 +477,18 @@ umount "$MNT/proc" 2>/dev/null || true
 umount "$MNT/sys" 2>/dev/null || true
 umount "$MNT/boot/efi" 2>/dev/null || true
 umount "$MNT" 2>/dev/null || true
+
+# Shrink root filesystem to exactly fit the partition
+# (loop device without sizelimit is larger than the partition)
+echo "  Resizing filesystem to match partition..."
+ROOT_END=$(sgdisk -i 2 "$IMG" 2>/dev/null | grep "Last sector" | awk '{print $3}')
+ROOT_START=1050624
+PART_BLOCKS=$(( (ROOT_END - ROOT_START + 1) / 8 ))
+echo "  Partition: sectors $ROOT_START-$ROOT_END = $PART_BLOCKS 4K blocks"
+e2fsck -f -y "$ROOT_LOOP" || true
+resize2fs "$ROOT_LOOP" "$PART_BLOCKS"
+e2fsck -f -y "$ROOT_LOOP" || true
+
 losetup -d "$EFI_LOOP" 2>/dev/null || true
 losetup -d "$ROOT_LOOP" 2>/dev/null || true
 sync
