@@ -183,6 +183,7 @@ ExecStart=-/sbin/agetty --autologin miner --noclear %I $TERM
 AUTOLOGIN
 
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+systemctl mask systemd-journal-flush.service
 
 cat > /etc/rc.local <<'RC'
 #!/bin/bash
