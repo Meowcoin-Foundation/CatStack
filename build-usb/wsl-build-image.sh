@@ -110,7 +110,7 @@ chroot "$MNT" bash -c '
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-    linux-image-generic linux-headers-generic \
+    linux-image-generic linux-headers-generic linux-modules-extra-generic \
     openssh-server python3 python3-venv \
     lm-sensors htop screen wget curl \
     net-tools pciutils usbutils \
@@ -190,6 +190,9 @@ network:
 EOF
 # Remove cloud-init network config
 rm -f "$MNT/etc/netplan/50-cloud-init.yaml" 2>/dev/null || true
+
+# Rebuild initramfs with all hardware modules (cloud image strips them)
+chroot "$MNT" bash -c 'KVER=$(ls /lib/modules/ | sort -V | tail -1); update-initramfs -c -k "$KVER"' 2>/dev/null || true
 
 # Blacklist nouveau
 cat > "$MNT/etc/modprobe.d/blacklist-nouveau.conf" <<'NOUVEAU'
