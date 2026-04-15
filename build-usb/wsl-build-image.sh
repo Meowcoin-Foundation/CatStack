@@ -202,27 +202,27 @@ SETUP
 chmod +x "$MNT/tmp/setup.sh"
 chroot "$MNT" /tmp/setup.sh
 
-# Nuclear option: DELETE journal-flush service files + force volatile journal
-# Masking (symlinks, kernel cmdline) all failed. Delete the actual unit files.
-rm -f "$MNT/lib/systemd/system/systemd-journal-flush.service"
-rm -f "$MNT/lib/systemd/system/systemd-journal-flush.socket"
-rm -f "$MNT/lib/systemd/system/systemd-journal-catalog-update.service"
-rm -f "$MNT/etc/systemd/system/systemd-journal-flush.service"
-rm -f "$MNT/etc/systemd/system/systemd-journal-flush.socket"
-rm -f "$MNT/etc/systemd/system/systemd-journal-catalog-update.service"
-# Remove any symlinks in wants/requires dirs
-find "$MNT/etc/systemd" "$MNT/lib/systemd" -name "*journal-flush*" -delete 2>/dev/null || true
-find "$MNT/etc/systemd" "$MNT/lib/systemd" -name "*journal-catalog*" -delete 2>/dev/null || true
-# Configure journald: volatile only (RAM), no disk writes
+# Blacklist nouveau driver - mining rigs use proprietary NVIDIA driver
+# nouveau spams "unknown chipset" errors on mining GPUs and crashes journald
+cat > "$MNT/etc/modprobe.d/blacklist-nouveau.conf" <<NOUVEAU
+blacklist nouveau
+blacklist lbm-nouveau
+options nouveau modeset=0
+alias nouveau off
+NOUVEAU
+# Also prevent initramfs from loading nouveau
+echo "blacklist nouveau" >> "$MNT/etc/modprobe.d/blacklist.conf" 2>/dev/null || true
+
+# Rebuild initramfs without nouveau
+chroot "$MNT" update-initramfs -u 2>/dev/null || true
+
+# Configure journald: volatile storage, reasonable limits
 mkdir -p "$MNT/etc/systemd"
 cat > "$MNT/etc/systemd/journald.conf" <<JCONF
 [Journal]
 Storage=volatile
 RuntimeMaxUse=50M
-ForwardToConsole=no
 JCONF
-# Don't create /var/log/journal (forces volatile)
-rm -rf "$MNT/var/log/journal"
 echo "[4/7] Done"
 
 # [5/7] MeowFarm agent + miners
@@ -472,7 +472,7 @@ cat > "$MNT/boot/efi/loader/entries/meowos.conf" <<ENTRY
 title   MeowOS
 linux   /$KERNEL
 initrd  /$INITRD
-options root=UUID=$ROOT_UUID rw quiet net.ifnames=0 biosdevname=0 systemd.mask=systemd-journal-flush.service
+options root=UUID=$ROOT_UUID rw quiet net.ifnames=0 biosdevname=0 nouveau.modeset=0 rd.driver.blacklist=nouveau modprobe.blacklist=nouveau
 ENTRY
 
 # Verify
