@@ -206,23 +206,17 @@ sed -i "s/PRETTY_NAME=.*/PRETTY_NAME=\"MeowOS v$VERSION\"/" "$MNT/etc/os-release
 # Disable cloud-init (we don't need it)
 chroot "$MNT" bash -c 'touch /etc/cloud/cloud-init.disabled' 2>/dev/null || true
 
-# CRITICAL: Trigger systemd first-boot mode
-# Empty machine-id tells systemd to run ConditionFirstBoot=yes units,
-# which properly initialize journal directories, tmpfiles, etc.
+# NUCLEAR: Replace journald with /bin/true
+# journald hangs on every boot attempt regardless of:
+# - masking, symlinks, kernel cmdline, timeouts, drop-ins,
+#   volatile config, machine-id, dbus, cloud images
+# Mining rigs don't need system logging. Kill it dead.
+mv "$MNT/lib/systemd/systemd-journald" "$MNT/lib/systemd/systemd-journald.real"
+ln -s /bin/true "$MNT/lib/systemd/systemd-journald"
+# Create the sockets journald normally provides so other services don't complain
+mkdir -p "$MNT/run/systemd/journal"
+# Ensure machine-id exists
 echo "" > "$MNT/etc/machine-id"
-
-# If journald STILL fails, don't block boot - fail in 10 seconds not 3 minutes
-mkdir -p "$MNT/etc/systemd/system/systemd-journald.service.d"
-cat > "$MNT/etc/systemd/system/systemd-journald.service.d/override.conf" <<'JOVER'
-[Service]
-TimeoutStartSec=10
-TimeoutStopSec=10
-WatchdogSec=10
-JOVER
-
-# Ensure journal directories exist with correct ownership
-mkdir -p "$MNT/var/log/journal"
-chmod 2755 "$MNT/var/log/journal"
 
 echo "[3/6] Done"
 
