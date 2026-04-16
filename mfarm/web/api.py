@@ -118,13 +118,11 @@ async def get_rig_stats(name: str):
         raise HTTPException(404)
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(
+        stdout, _, rc = await loop.run_in_executor(
             _executor, lambda r=rig: pool.exec(r, "cat /var/run/mfarm/stats.json", timeout=5)
         )
-        stdout = result.get("stdout", "")
-        if stdout.strip():
-            import json as _json
-            return _json.loads(stdout)
+        if rc == 0 and stdout.strip():
+            return json.loads(stdout)
     except Exception:
         pass
     return {}
