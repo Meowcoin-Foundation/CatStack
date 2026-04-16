@@ -1,0 +1,13 @@
+[Unit]
+Description=MeowOS Phone-Home Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mfarm/meowos-phonehome.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

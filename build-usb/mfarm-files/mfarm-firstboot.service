@@ -1,0 +1,16 @@
+[Unit]
+Description=MFarm First-Boot Provisioning
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/opt/mfarm/.firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mfarm/mfarm-firstboot.sh
+RemainAfterExit=yes
+TimeoutStartSec=1800
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

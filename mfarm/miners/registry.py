@@ -1,0 +1,166 @@
+"""Registry of supported miners and their CLI flag mappings."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class MinerDefinition:
+    name: str
+    display_name: str
+    binary_name: str
+    supported_algos: list[str]
+    gpu_type: str  # "nvidia", "amd", "cpu", "any"
+    api_type: str  # "ccminer_tcp", "trex_http", "lolminer_http", "xmrig_http"
+    default_api_port: int
+    supports_solo: bool = False
+
+    @property
+    def default_install_path(self) -> str:
+        return f"/opt/mfarm/miners/{self.binary_name}"
+
+
+# ── Built-in miner definitions ──────────────────────────────────────
+
+MINERS: dict[str, MinerDefinition] = {}
+
+
+def _register(m: MinerDefinition):
+    MINERS[m.name] = m
+
+
+_register(MinerDefinition(
+    name="ccminer",
+    display_name="CCMiner",
+    binary_name="ccminer",
+    supported_algos=[
+        "yescrypt", "yescryptR8", "yescryptR16", "yescryptR32",
+        "scrypt", "scrypt:N", "sha256d", "sha256t",
+        "keccak", "keccakc", "lyra2v2", "lyra2v3", "lyra2z",
+        "neoscrypt", "x11", "x13", "x14", "x15", "x16r", "x16s",
+        "x17", "qubit", "quark", "blake2s", "skein", "skein2",
+        "groestl", "myr-gr", "lbry", "sib", "veltor",
+        "hmq1725", "phi", "phi2", "tribus", "allium",
+        "timetravel", "bitcore", "exosis", "hsr",
+    ],
+    gpu_type="nvidia",
+    api_type="ccminer_tcp",
+    default_api_port=4068,
+    supports_solo=True,
+))
+
+_register(MinerDefinition(
+    name="cpuminer-opt",
+    display_name="CPUMiner-Opt",
+    binary_name="cpuminer",
+    supported_algos=[
+        "yescrypt", "yescryptR8", "yescryptR16", "yescryptR32",
+        "scrypt", "scrypt:N", "sha256d", "sha3d",
+        "x11", "x13", "x14", "x15", "x16r", "x16s", "x17",
+        "lyra2v2", "lyra2v3", "lyra2z", "lyra2h",
+        "qubit", "quark", "groestl", "myr-gr",
+        "neoscrypt", "keccak", "keccakc",
+        "blake2s", "skein", "skein2",
+        "hmq1725", "phi", "phi2", "tribus", "allium",
+        "anime", "argon2d-crds", "argon2d-dyn",
+        "ghostrider", "minotaur", "minotaurx",
+        "power2b", "verthash",
+    ],
+    gpu_type="cpu",
+    api_type="ccminer_tcp",
+    default_api_port=4048,
+    supports_solo=True,
+))
+
+_register(MinerDefinition(
+    name="trex",
+    display_name="T-Rex Miner",
+    binary_name="t-rex",
+    supported_algos=[
+        "ethash", "etchash", "kawpow", "octopus",
+        "autolykos2", "firopow", "progpow",
+        "mtp", "tensority",
+        "blake3", "sha256t",
+    ],
+    gpu_type="nvidia",
+    api_type="trex_http",
+    default_api_port=4067,
+    supports_solo=False,
+))
+
+_register(MinerDefinition(
+    name="lolminer",
+    display_name="lolMiner",
+    binary_name="lolMiner",
+    supported_algos=[
+        "ethash", "etchash", "autolykos2",
+        "beamhashiii", "equihash", "zhash",
+        "cuckoo29", "cuckatoo31", "cuckatoo32",
+        "etchash", "ton",
+    ],
+    gpu_type="any",
+    api_type="lolminer_http",
+    default_api_port=44444,
+    supports_solo=False,
+))
+
+_register(MinerDefinition(
+    name="xmrig",
+    display_name="XMRig",
+    binary_name="xmrig",
+    supported_algos=[
+        "randomx", "rx/0", "rx/wow", "rx/arq",
+        "kawpow", "cn/r", "cn-heavy/xhv",
+        "argon2/chukwa", "argon2/ninja",
+        "ghostrider",
+    ],
+    gpu_type="any",
+    api_type="xmrig_http",
+    default_api_port=44445,
+    supports_solo=False,
+))
+
+
+_register(MinerDefinition(
+    name="miniz",
+    display_name="miniZ",
+    binary_name="miniZ",
+    supported_algos=[
+        "equihash144_5", "equihash192_7", "equihash210_9",
+        "equihash125_4", "equihash150_5", "equihash96_5",
+        "beamhashiii", "ethash", "etchash", "progpow",
+        "octopus",
+    ],
+    gpu_type="nvidia",
+    api_type="miniz_http",
+    default_api_port=20000,
+    supports_solo=False,
+))
+
+
+_register(MinerDefinition(
+    name="srbminer",
+    display_name="SRBMiner-Multi",
+    binary_name="SRBMiner-Multi",
+    supported_algos=[
+        "randomx", "rx/0", "rx/wow", "rx/arq",
+        "ethash", "etchash", "autolykos2",
+        "kawpow", "blake3", "sha256dt",
+        "ghostrider", "dynamo", "yespower",
+        "verthash", "heavyhash", "karlsenhash",
+        "pyrinhash", "sha512_256d_radiant",
+    ],
+    gpu_type="any",
+    api_type="srbminer_http",
+    default_api_port=21550,
+    supports_solo=False,
+))
+
+
+def get_miner(name: str) -> MinerDefinition | None:
+    return MINERS.get(name.lower())
+
+
+def list_miners() -> list[MinerDefinition]:
+    return list(MINERS.values())

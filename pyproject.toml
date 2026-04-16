@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mfarm"
+version = "0.1.0"
+description = "MeowFarm - Mining farm management system, HiveOS replacement"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "paramiko>=3.4",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+mfarm = "mfarm.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["mfarm*"]

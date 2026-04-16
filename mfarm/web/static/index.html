@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MeowFarm Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #1c2128;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --cyan: #39d2c0;
+  --purple: #bc8cff;
+  --orange: #f0883e;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ── Header ──────────────────────────────────────────── */
+
+header {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--cyan);
+  letter-spacing: 1px;
+}
+
+.logo span { color: var(--text-dim); font-weight: 400; }
+
+.header-stats {
+  display: flex;
+  gap: 32px;
+  font-size: 14px;
+}
+
+.header-stat {
+  text-align: center;
+}
+
+.header-stat .value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.header-stat .label {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  animation: pulse 2s infinite;
+}
+
+.status-dot.live { background: var(--green); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── Nav tabs ────────────────────────────────────────── */
+
+nav {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  display: flex;
+  gap: 0;
+}
+
+nav button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 10px 20px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+nav button:hover { color: var(--text); }
+nav button.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+
+/* ── Main content ────────────────────────────────────── */
+
+main { padding: 20px 24px; }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Rig cards ───────────────────────────────────────── */
+
+.rig-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.rig-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.2s;
+  cursor: pointer;
+}
+
+.rig-card:hover { border-color: var(--cyan); }
+.rig-card.offline { opacity: 0.6; }
+.rig-card.offline .card-header { background: #1a0000; }
+
+.card-header {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+
+.card-header .rig-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.card-header .rig-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+
+.rig-status.online { background: rgba(63,185,80,0.15); color: var(--green); }
+.rig-status.offline { background: rgba(248,81,73,0.15); color: var(--red); }
+.rig-status.idle { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.rig-status.hot { background: rgba(248,81,73,0.3); color: var(--red); }
+
+.card-body { padding: 12px 16px; }
+
+.card-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.card-row .label { color: var(--text-dim); }
+.card-row .value { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+.gpu-temps {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gpu-temp {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.gpu-temp.cool { background: rgba(63,185,80,0.15); color: var(--green); }
+.gpu-temp.warm { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.gpu-temp.hot { background: rgba(248,81,73,0.15); color: var(--red); }
+
+.card-footer {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.card-footer .tag {
+  background: var(--bg3);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* ── Rig detail modal ────────────────────────────────── */
+
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 200;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 40px;
+  overflow-y: auto;
+}
+
+.modal-overlay.active { display: flex; }
+
+.modal {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 900px;
+  margin-bottom: 40px;
+}
+
+.modal-header {
+  padding: 16px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 { font-size: 18px; }
+
+.modal-close {
+  background: none; border: none; color: var(--text-dim);
+  font-size: 24px; cursor: pointer;
+}
+
+.modal-close:hover { color: var(--text); }
+
+.modal-body { padding: 20px 24px; }
+
+.detail-section {
+  margin-bottom: 20px;
+}
+
+.detail-section h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.gpu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.gpu-table th {
+  text-align: left;
+  padding: 6px 10px;
+  color: var(--text-dim);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.gpu-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.gpu-table tr:last-child td { border-bottom: none; }
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.btn:hover { border-color: var(--cyan); color: var(--cyan); }
+.btn.danger:hover { border-color: var(--red); color: var(--red); }
+.btn.success { border-color: var(--green); color: var(--green); }
+
+/* ── Flight sheets / OC table ────────────────────────── */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 10px 16px;
+  color: var(--text-dim);
+  font-weight: 500;
+  background: var(--bg3);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.data-table td {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.data-table tr:hover td { background: var(--bg3); }
+
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-dim);
+}
+
+.empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+.empty-state p { font-size: 14px; }
+
+/* ── Terminal ────────────────────────────────────────── */
+
+.terminal {
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--green);
+  margin-top: 12px;
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <span class="status-dot live"></span>
+    MEOWFARM <span>Dashboard</span>
+  </div>
+  <div class="header-stats">
+    <div class="header-stat">
+      <div class="value" id="total-rigs">-</div>
+      <div class="label">Rigs Online</div>
+    </div>
+    <div class="header-stat">
+      <div class="value" id="total-hashrate">-</div>
+      <div class="label">GPU Hashrate</div>
+    </div>
+    <div class="header-stat">
+      <div class="value" id="total-cpu-hashrate">-</div>
+      <div class="label">CPU Hashrate</div>
+    </div>
+    <div class="header-stat">
+      <div class="value" id="total-gpu-power">-</div>
+      <div class="label">GPU Power</div>
+    </div>
+    <div class="header-stat">
+      <div class="value" id="total-cpu-power">-</div>
+      <div class="label">CPU Power</div>
+    </div>
+    <div class="header-stat">
+      <div class="value" id="total-accepted">-</div>
+      <div class="label">Accepted</div>
+    </div>
+  </div>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('dashboard')">Dashboard</button>
+  <button onclick="showTab('flightsheets')">Flight Sheets</button>
+  <button onclick="showTab('oc')">Overclock</button>
+  <button onclick="showTab('add-rig')">+ Add Rig</button>
+</nav>
+
+<main>
+  <!-- Dashboard Tab -->
+  <div class="tab-content active" id="tab-dashboard">
+    <div class="rig-grid" id="rig-grid"></div>
+    <div class="empty-state" id="no-rigs" style="display:none">
+      <div class="icon">&#9881;</div>
+      <p>No rigs configured. Add one to get started.</p>
+    </div>
+    <div id="discovered-section" style="display:none;margin-top:24px">
+      <h3 style="color:var(--cyan);margin-bottom:12px">New Rigs Detected (phone-home)</h3>
+      <div id="discovered-list"></div>
+    </div>
+  </div>
+
+  <!-- Flight Sheets Tab -->
+  <div class="tab-content" id="tab-flightsheets">
+    <div id="fs-list"></div>
+    <details style="margin-top:20px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px">
+      <summary style="cursor:pointer;font-weight:600;color:var(--cyan)">+ Create Flight Sheet</summary>
+      <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:700px">
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Name</label><input id="fs-name" placeholder="luckypepe-solo" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Coin</label><input id="fs-coin" placeholder="LKPEPE" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Miner</label><select id="fs-miner" onchange="onFSMinerChange()" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></select></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Algorithm</label><select id="fs-algo" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></select></div>
+        <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Pool URL</label><input id="fs-pool" placeholder="stratum+tcp://pool:3333 or http://node:9778" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Wallet</label><input id="fs-wallet" placeholder="Wallet address" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Password</label><input id="fs-pass" value="x" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Extra Args</label><input id="fs-extra" placeholder="--no-longpoll --segwit" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:flex;align-items:center;gap:8px;color:var(--text-dim);font-size:13px;margin-top:20px"><input type="checkbox" id="fs-solo"> Solo Mining (GBT)</label></div>
+        <div></div>
+        <div id="fs-solo-fields" style="grid-column:1/-1;display:none;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">RPC User</label><input id="fs-rpc-user" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+          <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">RPC Pass</label><input id="fs-rpc-pass" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+          <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Coinbase Address</label><input id="fs-coinbase" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        </div>
+        <div style="grid-column:1/-1;margin-top:8px">
+          <button class="btn success" onclick="createFS()">Create Flight Sheet</button>
+          <span id="fs-create-result" style="margin-left:12px;font-size:13px"></span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- OC Tab -->
+  <div class="tab-content" id="tab-oc">
+    <div id="oc-list"></div>
+    <details style="margin-top:20px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px">
+      <summary style="cursor:pointer;font-weight:600;color:var(--cyan)">+ Create OC Profile</summary>
+      <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:700px">
+        <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Profile Name</label><input id="oc-name" placeholder="4070ti-mining" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Core Offset (MHz)</label><input id="oc-core" type="number" placeholder="+100" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Mem Offset (MHz)</label><input id="oc-mem" type="number" placeholder="+2000" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Core Lock (MHz)</label><input id="oc-core-lock" type="number" placeholder="2600" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Mem Lock (MHz)</label><input id="oc-mem-lock" type="number" placeholder="e.g. 12251" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Power Limit (W)</label><input id="oc-pl" type="number" placeholder="200" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Fan Speed (%)</label><input id="oc-fan" type="number" placeholder="auto" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
+        <div style="grid-column:1/-1;margin-top:8px">
+          <button id="oc-create-btn" class="btn success" onclick="createOC()">Create Profile</button>
+          <span id="oc-create-result" style="margin-left:12px;font-size:13px"></span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Add Rig Tab -->
+  <div class="tab-content" id="tab-add-rig">
+    <div style="max-width:500px">
+      <h2 style="margin-bottom:16px">Add Rig</h2>
+      <div style="margin-bottom:12px">
+        <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Rig Name</label>
+        <input id="add-name" type="text" placeholder="gpu-rig-01" style="width:100%;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Host / IP</label>
+        <input id="add-host" type="text" placeholder="192.168.68.xxx" style="width:100%;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Or find by MAC Address</label>
+        <div style="display:flex;gap:8px">
+          <input id="add-mac" type="text" placeholder="f4:b5:20:02:56:45" style="flex:1;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+          <button class="btn" onclick="findByMac()">Scan</button>
+        </div>
+        <div id="mac-result" style="margin-top:6px;font-size:13px"></div>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:12px">
+        <div style="flex:1">
+          <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">SSH Port</label>
+          <input id="add-port" type="number" value="22" style="width:100%;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+        </div>
+        <div style="flex:1">
+          <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">SSH User</label>
+          <input id="add-user" type="text" value="root" style="width:100%;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+        </div>
+      </div>
+      <button class="btn success" onclick="addRig()" style="margin-top:8px">Add Rig</button>
+      <div id="add-result" style="margin-top:12px;font-size:13px"></div>
+    </div>
+  </div>
+</main>
+
+<!-- Rig Detail Modal -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="modal-title">Rig Detail</h2>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+let ws;
+let rigData = {};
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'stats_update') {
+      rigData = {};
+      msg.rigs.forEach(r => rigData[r.name] = r);
+      renderDashboard(msg.rigs);
+    }
+    if (msg.type === 'discovery') {
+      renderDiscovered(msg.rigs);
+    }
+  };
+
+  ws.onclose = () => setTimeout(connect, 3000);
+  ws.onerror = () => ws.close();
+}
+
+function renderDashboard(rigs) {
+  const grid = document.getElementById('rig-grid');
+  const noRigs = document.getElementById('no-rigs');
+
+  if (!rigs.length) {
+    grid.innerHTML = '';
+    noRigs.style.display = 'block';
+    return;
+  }
+  noRigs.style.display = 'none';
+
+  // Totals
+  let online = 0, totalHr = 0, totalCpuHr = 0, totalGpuPwr = 0, totalCpuPwr = 0, totalAcc = 0;
+  rigs.forEach(r => {
+    if (r.online && r.stats) {
+      online++;
+      const m = r.stats.miner || {};
+      totalHr += m.hashrate || 0;
+      totalAcc += m.accepted || 0;
+      (r.stats.gpus || []).forEach(g => totalGpuPwr += g.power_draw || 0);
+      totalCpuPwr += (r.stats.cpu || {}).power_draw || 0;
+      totalCpuHr += (r.stats.cpu_miner || {}).hashrate || 0;
+    }
+  });
+
+  document.getElementById('total-rigs').textContent = `${online}/${rigs.length}`;
+  document.getElementById('total-hashrate').textContent = fmtHash(totalHr);
+  document.getElementById('total-cpu-hashrate').textContent = fmtHash(totalCpuHr);
+  document.getElementById('total-gpu-power').textContent = totalGpuPwr ? `${totalGpuPwr.toFixed(0)}W` : '-';
+  document.getElementById('total-cpu-power').textContent = totalCpuPwr ? `${totalCpuPwr.toFixed(0)}W` : '-';
+  document.getElementById('total-accepted').textContent = totalAcc || '-';
+
+  grid.innerHTML = rigs.map(r => rigCard(r)).join('');
+}
+
+function rigCard(r) {
+  const s = r.stats || {};
+  const m = s.miner || {};
+  const gpus = s.gpus || [];
+  const online = r.online && s.miner;
+  const mining = online && m.running;
+  const maxTemp = Math.max(...gpus.map(g => g.temp || 0), 0);
+
+  let status, statusClass;
+  if (!r.online) { status = 'OFFLINE'; statusClass = 'offline'; }
+  else if (!m.running) { status = 'IDLE'; statusClass = 'idle'; }
+  else if (maxTemp >= 80) { status = 'HOT'; statusClass = 'hot'; }
+  else { status = 'MINING'; statusClass = 'online'; }
+
+  const hr = mining ? fmtHash(m.hashrate || 0) : '-';
+  const algo = m.algo || '-';
+  const pwr = gpus.reduce((s, g) => s + (g.power_draw || 0), 0);
+  const uptime = s.uptime_secs ? fmtUptime(s.uptime_secs) : '-';
+
+  const temps = gpus.map(g => {
+    const t = g.temp;
+    if (t == null) return '';
+    const cls = t >= 80 ? 'hot' : t >= 65 ? 'warm' : 'cool';
+    return `<span class="gpu-temp ${cls}">${t}C</span>`;
+  }).join('');
+
+  const acc = m.accepted || 0;
+  const rej = m.rejected || 0;
+
+  return `
+    <div class="rig-card ${r.online ? '' : 'offline'}" onclick="openRig('${r.name}')">
+      <div class="card-header">
+        <span class="rig-name">${r.name}</span>
+        <span class="rig-status ${statusClass}">${status}</span>
+      </div>
+      <div class="card-body">
+        <div class="card-row"><span class="label">Hashrate</span><span class="value">${hr}</span></div>
+        <div class="card-row"><span class="label">Algorithm</span><span class="value">${algo}</span></div>
+        <div class="card-row"><span class="label">Power</span><span class="value">${pwr ? pwr.toFixed(0) + 'W' : '-'}</span></div>
+        <div class="card-row"><span class="label">Temps</span><span class="value"><span class="gpu-temps">${temps || '-'}</span></span></div>
+        <div class="card-row"><span class="label">Shares</span><span class="value">${acc}/${rej}</span></div>
+        <div class="card-row"><span class="label">GPU Ping</span><span class="value" style="${(s.gpu_pool_ping_ms||0) > 100 ? 'color:var(--red)' : (s.gpu_pool_ping_ms||0) > 50 ? 'color:var(--yellow)' : 'color:var(--green)'}">${s.gpu_pool_ping_ms != null ? s.gpu_pool_ping_ms + ' ms' : '-'}</span></div>
+        <div class="card-row"><span class="label">CPU Ping</span><span class="value" style="${(s.cpu_pool_ping_ms||0) > 100 ? 'color:var(--red)' : (s.cpu_pool_ping_ms||0) > 50 ? 'color:var(--yellow)' : 'color:var(--green)'}">${s.cpu_pool_ping_ms != null ? s.cpu_pool_ping_ms + ' ms' : '-'}</span></div>
+        <div class="card-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
+      </div>
+      <div class="card-footer">
+        ${r.flight_sheet ? `<span class="tag">${r.flight_sheet}</span>` : ''}
+        ${r.group ? `<span class="tag">${r.group}</span>` : ''}
+        <span class="tag">${r.host}</span>
+      </div>
+    </div>`;
+}
+
+async function openRig(name) {
+  // Force fresh stats fetch when clicking on a rig
+  try {
+    const res = await fetch(`/api/rigs/${name}/stats`);
+    if (res.ok) {
+      const fresh = await res.json();
+      if (rigData[name]) rigData[name].stats = fresh;
+    }
+  } catch(e) {}
+  const r = rigData[name];
+  if (!r) return;
+  const s = r.stats || {};
+  const m = s.miner || {};
+  const gpus = s.gpus || [];
+  const cpu = s.cpu || {};
+  const sys = s.system || {};
+
+  document.getElementById('modal-title').textContent = `${name} (${r.host})`;
+
+  let html = '';
+
+  // Info section
+  html += `<div class="detail-section">
+    <h3>Info</h3>
+    <div class="card-row"><span class="label">OS</span><span class="value">${r.os_info || 'unknown'}</span></div>
+    <div class="card-row"><span class="label">CPU</span><span class="value">${r.cpu_model || cpu.model || 'unknown'}${cpu.sockets > 1 ? ' x' + cpu.sockets : ''}</span></div>
+    <div class="card-row"><span class="label">CPU Config</span><span class="value">${cpu.cores ? cpu.cores + ' cores / ' + (cpu.threads || '') + ' threads' : '-'}</span></div>
+    <div class="card-row"><span class="label">Agent</span><span class="value">${r.agent_version || s.agent_version || '-'}</span></div>
+    <div class="card-row"><span class="label">Flight Sheet</span><span class="value">${r.flight_sheet || '-'}</span></div>
+    <div class="card-row"><span class="label">OC Profile</span><span class="value">${r.oc_profile || '-'}</span></div>
+    <div class="card-row"><span class="label">Uptime</span><span class="value">${s.uptime_secs ? fmtUptime(s.uptime_secs) : '-'}</span></div>
+    <div class="card-row"><span class="label">CPU Temp</span><span class="value" style="${(cpu.temp||0) >= 80 ? 'color:var(--red)' : (cpu.temp||0) >= 65 ? 'color:var(--yellow)' : 'color:var(--green)'}">${cpu.temp ? cpu.temp + 'C' : '-'}</span></div>
+    <div class="card-row"><span class="label">CPU Freq</span><span class="value">${cpu.freq_mhz ? cpu.freq_mhz + ' MHz' : '-'}</span></div>
+    <div class="card-row"><span class="label">CPU Power</span><span class="value">${cpu.power_draw != null ? cpu.power_draw.toFixed(1) + 'W' : '-'}</span></div>
+    <div class="card-row"><span class="label">CPU Usage</span><span class="value">${cpu.usage_pct != null ? cpu.usage_pct + '%' : '-'}</span></div>
+    <div class="card-row"><span class="label">Load</span><span class="value">${sys.load_1m ?? '-'}</span></div>
+    <div class="card-row"><span class="label">RAM</span><span class="value">${sys.mem_used_mb && sys.mem_total_mb ? `${sys.mem_used_mb}/${sys.mem_total_mb} MB` : '-'}</span></div>
+  </div>`;
+
+  // GPU table
+  if (gpus.length) {
+    html += `<div class="detail-section">
+      <h3>GPUs (${gpus.length})</h3>
+      <table class="gpu-table">
+        <tr><th>GPU</th><th>Name</th><th>Core</th><th>Mem</th><th>Fan</th><th>Core Clk</th><th>Mem Clk</th><th>Power</th><th>Hashrate</th></tr>
+        ${gpus.map(g => {
+          const tc = (g.temp || 0) >= 80 ? 'color:var(--red)' : (g.temp || 0) >= 65 ? 'color:var(--yellow)' : 'color:var(--green)';
+          const mc = (g.mem_temp || 0) >= 100 ? 'color:var(--red)' : (g.mem_temp || 0) >= 85 ? 'color:var(--yellow)' : 'color:var(--green)';
+          return `<tr>
+            <td>${g.index ?? '?'}</td>
+            <td>${g.name || 'Unknown'}</td>
+            <td style="${tc};font-weight:600">${g.temp != null ? g.temp + 'C' : '-'}</td>
+            <td style="${mc};font-weight:600">${g.mem_temp != null ? g.mem_temp + 'C' : '-'}</td>
+            <td>${g.fan != null ? g.fan + '%' : '-'}</td>
+            <td>${g.core_clock || '-'}</td>
+            <td>${g.mem_clock || '-'}</td>
+            <td>${g.power_draw ? g.power_draw.toFixed(0) + 'W' : '-'}</td>
+            <td>${g.hashrate ? fmtHash(g.hashrate) : '-'}</td>
+          </tr>`;
+        }).join('')}
+      </table>
+    </div>`;
+  }
+
+  // Hashrate history chart
+  html += `<div class="detail-section">
+    <h3>Hashrate (24h)</h3>
+    <div style="position:relative;height:200px;margin-top:8px"><canvas id="hr-chart"></canvas></div>
+  </div>`;
+
+  // Miner section
+  html += `<div class="detail-section">
+    <h3>Miner</h3>
+    <div class="card-row"><span class="label">Software</span><span class="value">${m.name || '-'} ${m.version || ''}</span></div>
+    <div class="card-row"><span class="label">Algorithm</span><span class="value">${m.algo || '-'}</span></div>
+    <div class="card-row"><span class="label">Pool</span><span class="value" style="word-break:break-all">${m.pool || '-'}</span></div>
+    <div class="card-row"><span class="label">Hashrate</span><span class="value">${m.hashrate ? fmtHash(m.hashrate) : '-'}</span></div>
+    <div class="card-row"><span class="label">Accepted</span><span class="value" style="color:var(--green)">${m.accepted || 0}</span></div>
+    <div class="card-row"><span class="label">Rejected</span><span class="value" style="color:var(--red)">${m.rejected || 0}</span></div>
+    <div class="card-row"><span class="label">Restarts</span><span class="value">${m.restarts || 0}</span></div>
+  </div>`;
+
+  // Actions
+  html += `<div class="detail-section">
+    <h3>Actions</h3>
+    <div class="action-buttons">
+      <button class="btn" onclick="rigAction('${name}','restart-miner')">Restart Miner</button>
+      <button class="btn" onclick="rigAction('${name}','stop-miner')">Stop Miner</button>
+      <button class="btn danger" onclick="rigAction('${name}','reboot')">Reboot Rig</button>
+      <button class="btn" onclick="openSSH('${name}')">SSH Terminal</button>
+      <button class="btn" onclick="viewMinerLog('${name}','gpu')">GPU Miner Log</button>
+      <button class="btn" onclick="viewMinerLog('${name}','cpu')">CPU Miner Log</button>
+      <button class="btn" onclick="updateMiners('${name}')">Update Miners</button>
+      <button class="btn" onclick="renameRig('${name}')">Rename</button>
+      <button class="btn danger" onclick="deleteRig('${name}')">Remove Rig</button>
+    </div>
+    <div class="terminal" id="term-${name}" style="display:none"></div>
+  </div>`;
+
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('modal').classList.add('active');
+
+  // Load hashrate history chart
+  loadHashrateChart(name);
+}
+
+let _hrChart = null;
+async function loadHashrateChart(rigName) {
+  const canvas = document.getElementById('hr-chart');
+  if (!canvas) return;
+  try {
+    const res = await fetch(`/api/rigs/${rigName}/history?hours=24`);
+    const data = await res.json();
+    if (_hrChart) { _hrChart.destroy(); _hrChart = null; }
+    if (!data.length) {
+      canvas.parentElement.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px 0">No history yet. Data accumulates every 60 seconds.</p>';
+      return;
+    }
+    const labels = data.map(d => {
+      const dt = new Date(d.t + 'Z');
+      return dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    });
+    const hrData = data.map(d => d.hr);
+    const pwData = data.map(d => d.power);
+    _hrChart = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Hashrate (Sol/s)', data: hrData, borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2, yAxisID: 'y' },
+          { label: 'Power (W)', data: pwData, borderColor: '#f59e0b', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 1.5, yAxisID: 'y1' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { labels: { color: '#aaa', boxWidth: 12, font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { position: 'left', ticks: { color: '#00d4aa', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' }, title: { display: true, text: 'Sol/s', color: '#00d4aa', font: { size: 10 } } },
+          y1: { position: 'right', ticks: { color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Watts', color: '#f59e0b', font: { size: 10 } } },
+        },
+      },
+    });
+  } catch(e) {
+    canvas.parentElement.innerHTML = `<p style="color:var(--red);text-align:center">Failed to load history: ${e.message}</p>`;
+  }
+}
+
+function closeModal() {
+  if (_hrChart) { _hrChart.destroy(); _hrChart = null; }
+  document.getElementById('modal').classList.remove('active');
+}
+
+async function rigAction(name, action) {
+  try {
+    const res = await fetch(`/api/rigs/${name}/${action}`, { method: 'POST' });
+    const data = await res.json();
+    const term = document.getElementById(`term-${name}`);
+    term.style.display = 'block';
+    term.textContent = `> ${action}\n${JSON.stringify(data, null, 2)}`;
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+function openSSH(name) {
+  closeModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay active';
+  overlay.id = 'ssh-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) closeSSH(); };
+  overlay.innerHTML = `
+    <div style="background:var(--card);border-radius:12px;width:90%;max-width:900px;overflow:hidden">
+      <div style="padding:12px 16px;background:#1a1a2e;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:600">SSH: ${name}</span>
+        <button class="btn btn-sm btn-secondary" onclick="closeSSH()">Close</button>
+      </div>
+      <div id="ssh-output" class="terminal" style="height:400px;max-height:60vh;margin:0;border-radius:0;font-size:13px;line-height:1.5;overflow-y:auto;padding:12px"></div>
+      <div style="display:flex;padding:0;background:#000;border-radius:0 0 12px 12px">
+        <span style="color:#3fb950;padding:8px 4px 8px 12px;font-family:monospace;font-size:13px">$</span>
+        <input id="ssh-input" type="text" style="flex:1;background:#000;border:none;color:#e6edf3;font-family:monospace;font-size:13px;padding:8px;outline:none"
+          placeholder="Type command and press Enter" onkeydown="if(event.key==='Enter')sshExec('${name}')">
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('ssh-output').textContent = 'Connected to ' + name + '\n\n';
+  document.getElementById('ssh-input').focus();
+}
+
+async function sshExec(name) {
+  const input = document.getElementById('ssh-input');
+  const output = document.getElementById('ssh-output');
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  input.value = '';
+  output.textContent += '$ ' + cmd + '\n';
+  try {
+    const res = await fetch(`/api/rigs/${name}/exec`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd }),
+    });
+    const data = await res.json();
+    if (data.stdout) output.textContent += data.stdout;
+    if (data.stderr) output.textContent += data.stderr;
+    if (!data.stdout && !data.stderr) output.textContent += '\n';
+  } catch (e) {
+    output.textContent += 'Error: ' + e.message + '\n';
+  }
+  output.scrollTop = output.scrollHeight;
+  input.focus();
+}
+
+function closeSSH() {
+  const el = document.getElementById('ssh-overlay');
+  if (el) el.remove();
+}
+
+let consoleInterval = null;
+
+function viewMinerLog(name, type) {
+  // Close the rig detail modal
+  closeModal();
+
+  // Open the console modal
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay active';
+  overlay.id = 'console-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) closeConsole(); };
+
+  const label = type === 'cpu' ? 'XMRig CPU' : 'CCMiner GPU';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:1000px">
+      <div class="modal-header">
+        <h2>${name} - ${label} Console</h2>
+        <button class="modal-close" onclick="closeConsole()">&times;</button>
+      </div>
+      <div style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap">
+        ${type === 'cpu' ? `
+          <button class="btn" onclick="minerCmd('${name}','${type}','summary')">Summary</button>
+          <button class="btn" onclick="minerCmd('${name}','${type}','hashrate')">Hashrate</button>
+        ` : `
+          <button class="btn" onclick="minerCmd('${name}','${type}','summary')">Summary</button>
+          <button class="btn" onclick="minerCmd('${name}','${type}','threads')">Threads</button>
+          <button class="btn" onclick="minerCmd('${name}','${type}','pool')">Pool</button>
+        `}
+        <button class="btn" onclick="refreshConsole('${name}','${type}')">Refresh</button>
+        <label style="display:flex;align-items:center;gap:4px;color:var(--text-dim);font-size:12px;margin-left:auto">
+          <input type="checkbox" id="console-auto" checked onchange="toggleAutoRefresh('${name}','${type}')"> Auto-refresh
+        </label>
+      </div>
+      <div id="console-output" class="terminal" style="height:500px;max-height:70vh;margin:0;border-radius:0 0 12px 12px;font-size:12px;line-height:1.4;overflow-y:auto">Loading...</div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  refreshConsole(name, type);
+  consoleInterval = setInterval(() => refreshConsole(name, type), 2000);
+}
+
+function closeConsole() {
+  if (consoleInterval) { clearInterval(consoleInterval); consoleInterval = null; }
+  const overlay = document.getElementById('console-overlay');
+  if (overlay) overlay.remove();
+}
+
+async function refreshConsole(name, type) {
+  try {
+    const res = await fetch(`/api/rigs/${name}/miner-log/${type}?lines=80`);
+    const data = await res.json();
+    const el = document.getElementById('console-output');
+    if (el) {
+      el.textContent = data.log || 'No log output';
+      el.scrollTop = el.scrollHeight;
+    }
+  } catch(e) {}
+}
+
+function toggleAutoRefresh(name, type) {
+  const checked = document.getElementById('console-auto').checked;
+  if (checked) {
+    if (!consoleInterval) consoleInterval = setInterval(() => refreshConsole(name, type), 2000);
+  } else {
+    if (consoleInterval) { clearInterval(consoleInterval); consoleInterval = null; }
+  }
+}
+
+async function minerCmd(name, type, command) {
+  const el = document.getElementById('console-output');
+  if (!el) return;
+  el.textContent += `\n\n>>> ${command.toUpperCase()} <<<\nQuerying...\n`;
+  el.scrollTop = el.scrollHeight;
+  try {
+    const res = await fetch(`/api/rigs/${name}/miner-api/${type}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ command }),
+    });
+    const data = await res.json();
+    if (data.raw) {
+      el.textContent += data.result;
+    } else {
+      el.textContent += JSON.stringify(data.result, null, 2);
+    }
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {
+    el.textContent += `Error: ${e.message}`;
+  }
+}
+
+async function updateMiners(name) {
+  if (!confirm(`Update all miner binaries on "${name}"? This may take a few minutes.`)) return;
+  try {
+    const r = await fetch(`/api/rigs/${name}/update-miners`, { method: 'POST' });
+    const d = await r.json();
+    alert(d.status === 'updated' ? 'Miners updated!' : 'Error: ' + d.error);
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function renameRig(name) {
+  const newName = prompt(`Rename "${name}" to:`, name);
+  if (!newName || newName === name) return;
+  try {
+    const r = await fetch(`/api/rigs/${name}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newName})
+    });
+    if (!r.ok) { const e = await r.json(); alert(e.detail || 'Error'); return; }
+    closeModal();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function deleteRig(name) {
+  if (!confirm(`Remove rig "${name}" from MeowFarm?`)) return;
+  try {
+    await fetch(`/api/rigs/${name}`, { method: 'DELETE' });
+    closeModal();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+async function addRig() {
+  const name = document.getElementById('add-name').value.trim();
+  const host = document.getElementById('add-host').value.trim();
+  const port = parseInt(document.getElementById('add-port').value) || 22;
+  const user = document.getElementById('add-user').value.trim() || 'root';
+  const result = document.getElementById('add-result');
+
+  if (!name || !host) { result.innerHTML = '<span style="color:var(--red)">Name and host are required</span>'; return; }
+
+  try {
+    const res = await fetch('/api/rigs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, host, ssh_port: port, ssh_user: user }),
+    });
+    if (res.ok) {
+      result.innerHTML = `<span style="color:var(--green)">Added ${name} (${host})</span>`;
+      document.getElementById('add-name').value = '';
+      document.getElementById('add-host').value = '';
+      showTab('dashboard');
+    } else {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--red)">${err.detail}</span>`;
+    }
+  } catch (e) {
+    result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+}
+
+async function findByMac() {
+  const mac = document.getElementById('add-mac').value.trim();
+  const result = document.getElementById('mac-result');
+  if (!mac) { result.innerHTML = '<span style="color:var(--red)">Enter a MAC address</span>'; return; }
+  result.innerHTML = '<span style="color:var(--yellow)">Scanning subnet...</span>';
+  try {
+    const res = await fetch('/api/find-by-mac', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mac }),
+    });
+    const data = await res.json();
+    if (data.ip) {
+      document.getElementById('add-host').value = data.ip;
+      result.innerHTML = `<span style="color:var(--green)">Found at ${data.ip}</span>`;
+    } else {
+      result.innerHTML = `<span style="color:var(--red)">MAC not found on network. Is the rig powered on?</span>`;
+    }
+  } catch(e) { result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+// ── Flight sheets tab ──
+
+async function loadFlightSheets() {
+  const res = await fetch('/api/flightsheets');
+  const sheets = await res.json();
+  const div = document.getElementById('fs-list');
+
+  if (!sheets.length) {
+    div.innerHTML = '<div class="empty-state"><div class="icon">&#128221;</div><p>No flight sheets yet. Create one below.</p></div>';
+    return;
+  }
+
+  div.innerHTML = `<table class="data-table">
+    <tr><th>Name</th><th>Coin</th><th>Algo</th><th>Miner</th><th>Pool</th><th>Solo</th><th>Actions</th></tr>
+    ${sheets.map(fs => `<tr>
+      <td style="color:var(--cyan);font-weight:600">${fs.name}</td>
+      <td style="color:var(--yellow)">${fs.coin}</td>
+      <td>${fs.algo}</td>
+      <td style="color:var(--green)">${fs.miner}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fs.pool_url}</td>
+      <td>${fs.is_solo ? 'Yes' : ''}</td>
+      <td style="display:flex;gap:6px"><button class="btn" onclick="applyFS('${fs.name}')">Apply</button><button class="btn danger" onclick="deleteFS('${fs.name}')">Delete</button></td>
+    </tr>`).join('')}
+  </table>`;
+}
+
+async function applyFS(fsName) {
+  const target = await pickTarget(`Apply "${fsName}" to:`);
+  if (!target) return;
+  const res = await fetch(`/api/flightsheets/${fsName}/apply/${target}`, { method: 'POST' });
+  const data = await res.json();
+  alert(JSON.stringify(data.results, null, 2));
+}
+
+async function deleteFS(name) {
+  if (!confirm(`Delete flight sheet "${name}"?`)) return;
+  await fetch(`/api/flightsheets/${name}`, { method: 'DELETE' });
+  loadFlightSheets();
+}
+
+// Miner registry for algo dropdown
+let _miners = [];
+async function loadMinerRegistry() {
+  try {
+    _miners = await (await fetch('/api/miners')).json();
+    const sel = document.getElementById('fs-miner');
+    sel.innerHTML = _miners.map(m =>
+      `<option value="${m.name}">${m.display_name} (${m.gpu_type})</option>`
+    ).join('');
+    onFSMinerChange();
+  } catch(e) { console.error('Failed to load miners', e); }
+}
+function onFSMinerChange() {
+  const name = document.getElementById('fs-miner').value;
+  const m = _miners.find(x => x.name === name);
+  const algoSel = document.getElementById('fs-algo');
+  if (m) {
+    algoSel.innerHTML = m.algos.map(a => `<option value="${a}">${a}</option>`).join('');
+  }
+}
+loadMinerRegistry();
+
+async function createFS() {
+  const result = document.getElementById('fs-create-result');
+  const solo = document.getElementById('fs-solo').checked;
+  const body = {
+    name: document.getElementById('fs-name').value.trim(),
+    coin: document.getElementById('fs-coin').value.trim(),
+    algo: document.getElementById('fs-algo').value.trim(),
+    miner: document.getElementById('fs-miner').value,
+    pool_url: document.getElementById('fs-pool').value.trim(),
+    wallet: document.getElementById('fs-wallet').value.trim(),
+    password: document.getElementById('fs-pass').value.trim() || 'x',
+    extra_args: document.getElementById('fs-extra').value.trim(),
+    is_solo: solo,
+  };
+  if (solo) {
+    body.solo_rpc_user = document.getElementById('fs-rpc-user').value.trim();
+    body.solo_rpc_pass = document.getElementById('fs-rpc-pass').value.trim();
+    body.coinbase_addr = document.getElementById('fs-coinbase').value.trim();
+  }
+  if (!body.name || !body.coin || !body.pool_url || !body.wallet) {
+    result.innerHTML = '<span style="color:var(--red)">Name, coin, pool, and wallet are required</span>';
+    return;
+  }
+  try {
+    const res = await fetch('/api/flightsheets', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (res.ok) {
+      result.innerHTML = `<span style="color:var(--green)">Created "${body.name}"</span>`;
+      loadFlightSheets();
+    } else {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--red)">${err.detail}</span>`;
+    }
+  } catch(e) { result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+// ── OC tab ──
+
+async function loadOcProfiles() {
+  const res = await fetch('/api/oc-profiles');
+  const profiles = await res.json();
+  const div = document.getElementById('oc-list');
+
+  if (!profiles.length) {
+    div.innerHTML = '<div class="empty-state"><div class="icon">&#9889;</div><p>No OC profiles yet. Create one below.</p></div>';
+    return;
+  }
+
+  div.innerHTML = `<table class="data-table">
+    <tr><th>Name</th><th>Core Offset</th><th>Mem Offset</th><th>Core Lock</th><th>Mem Lock</th><th>Power</th><th>Fan</th><th>Actions</th></tr>
+    ${profiles.map(p => `<tr>
+      <td style="color:var(--cyan);font-weight:600">${p.name}</td>
+      <td>${p.core_offset != null ? (p.core_offset > 0 ? '+' : '') + p.core_offset + ' MHz' : '-'}</td>
+      <td>${p.mem_offset != null ? (p.mem_offset > 0 ? '+' : '') + p.mem_offset + ' MHz' : '-'}</td>
+      <td>${p.core_lock != null ? p.core_lock + ' MHz' : '-'}</td>
+      <td>${p.mem_lock != null ? p.mem_lock + ' MHz' : '-'}</td>
+      <td>${p.power_limit != null ? p.power_limit + 'W' : '-'}</td>
+      <td>${p.fan_speed != null ? p.fan_speed + '%' : 'auto'}</td>
+      <td style="display:flex;gap:6px"><button class="btn" onclick="applyOC('${p.name}')">Apply</button><button class="btn" onclick="editOC(${JSON.stringify(JSON.stringify(p))})">Edit</button><button class="btn danger" onclick="deleteOC('${p.name}')">Delete</button></td>
+    </tr>`).join('')}
+  </table>`;
+}
+
+async function createOC() {
+  const result = document.getElementById('oc-create-result');
+  const body = { name: document.getElementById('oc-name').value.trim() };
+  const core = document.getElementById('oc-core').value;
+  const mem = document.getElementById('oc-mem').value;
+  const coreLock = document.getElementById('oc-core-lock').value;
+  const memLock = document.getElementById('oc-mem-lock').value;
+  const pl = document.getElementById('oc-pl').value;
+  const fan = document.getElementById('oc-fan').value;
+  if (core) body.core_offset = parseInt(core);
+  if (mem) body.mem_offset = parseInt(mem);
+  if (coreLock) body.core_lock = parseInt(coreLock);
+  if (memLock) body.mem_lock = parseInt(memLock);
+  if (pl) body.power_limit = parseInt(pl);
+  if (fan) body.fan_speed = parseInt(fan);
+  if (!body.name) { result.innerHTML = '<span style="color:var(--red)">Name is required</span>'; return; }
+  try {
+    const res = await fetch('/api/oc-profiles', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (res.ok) {
+      result.innerHTML = `<span style="color:var(--green)">Created "${body.name}"</span>`;
+      loadOcProfiles();
+    } else {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--red)">${err.detail}</span>`;
+    }
+  } catch(e) { result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+async function applyOC(name) {
+  const target = await pickTarget(`Apply OC "${name}" to:`);
+  if (!target) return;
+  try {
+    const res = await fetch(`/api/oc-profiles/${name}/apply/${target}`, { method: 'POST' });
+    const data = await res.json();
+    alert(JSON.stringify(data.results, null, 2));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function editOC(profileJson) {
+  const p = JSON.parse(profileJson);
+  document.getElementById('oc-name').value = p.name;
+  document.getElementById('oc-name').disabled = true;
+  document.getElementById('oc-core').value = p.core_offset ?? '';
+  document.getElementById('oc-mem').value = p.mem_offset ?? '';
+  document.getElementById('oc-core-lock').value = p.core_lock ?? '';
+  document.getElementById('oc-mem-lock').value = p.mem_lock ?? '';
+  document.getElementById('oc-pl').value = p.power_limit ?? '';
+  document.getElementById('oc-fan').value = p.fan_speed ?? '';
+  const btn = document.getElementById('oc-create-btn');
+  btn.textContent = 'Save Changes';
+  btn.onclick = () => saveOCEdit(p.name);
+  document.getElementById('oc-create-result').innerHTML = `<span style="color:var(--cyan)">Editing "${p.name}"</span>`;
+}
+
+async function saveOCEdit(name) {
+  const result = document.getElementById('oc-create-result');
+  const body = {};
+  const core = document.getElementById('oc-core').value;
+  const mem = document.getElementById('oc-mem').value;
+  const coreLock = document.getElementById('oc-core-lock').value;
+  const memLock = document.getElementById('oc-mem-lock').value;
+  const pl = document.getElementById('oc-pl').value;
+  const fan = document.getElementById('oc-fan').value;
+  if (core !== '') body.core_offset = parseInt(core);
+  if (mem !== '') body.mem_offset = parseInt(mem);
+  if (coreLock !== '') body.core_lock = parseInt(coreLock);
+  if (memLock !== '') body.mem_lock = parseInt(memLock);
+  if (pl !== '') body.power_limit = parseInt(pl);
+  if (fan !== '') body.fan_speed = parseInt(fan);
+  try {
+    const res = await fetch(`/api/oc-profiles/${name}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (res.ok) {
+      result.innerHTML = `<span style="color:var(--green)">Updated "${name}"</span>`;
+      loadOcProfiles();
+      resetOCForm();
+    } else {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--red)">${err.detail}</span>`;
+    }
+  } catch(e) { result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
+
+function resetOCForm() {
+  document.getElementById('oc-name').value = '';
+  document.getElementById('oc-name').disabled = false;
+  document.getElementById('oc-core').value = '';
+  document.getElementById('oc-mem').value = '';
+  document.getElementById('oc-core-lock').value = '';
+  document.getElementById('oc-mem-lock').value = '';
+  document.getElementById('oc-pl').value = '';
+  document.getElementById('oc-fan').value = '';
+  const btn = document.getElementById('oc-create-btn');
+  btn.textContent = 'Create Profile';
+  btn.onclick = createOC;
+  document.getElementById('oc-create-result').innerHTML = '';
+}
+
+async function deleteOC(name) {
+  if (!confirm(`Delete OC profile "${name}"?`)) return;
+  await fetch(`/api/oc-profiles/${name}`, { method: 'DELETE' });
+  loadOcProfiles();
+}
+
+// ── Tabs ──
+
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+
+  if (name === 'flightsheets') loadFlightSheets();
+  if (name === 'oc') loadOcProfiles();
+}
+
+// ── Formatters ──
+
+function fmtHash(h) {
+  if (!h || h === 0) return '-';
+  if (h >= 1e12) return (h/1e12).toFixed(2) + ' TH/s';
+  if (h >= 1e9) return (h/1e9).toFixed(2) + ' GH/s';
+  if (h >= 1e6) return (h/1e6).toFixed(2) + ' MH/s';
+  if (h >= 1e3) return (h/1e3).toFixed(2) + ' KH/s';
+  return h.toFixed(1) + ' H/s';
+}
+
+function fmtUptime(secs) {
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+// ── Discovered rigs (phone-home) ──
+
+function renderDiscovered(rigs) {
+  const section = document.getElementById('discovered-section');
+  const list = document.getElementById('discovered-list');
+  const newRigs = rigs.filter(r => !r.already_added);
+  if (!newRigs.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  list.innerHTML = `<table class="data-table">
+    <tr><th>Hostname</th><th>IP</th><th>MAC</th><th>Interface</th><th>Seen</th><th>Action</th></tr>
+    ${newRigs.map(r => `<tr>
+      <td style="color:var(--cyan);font-weight:600">${r.hostname}</td>
+      <td>${r.ip}</td>
+      <td style="font-family:monospace">${r.mac}</td>
+      <td>${r.interface}</td>
+      <td>${r.age_secs < 60 ? r.age_secs + 's ago' : Math.round(r.age_secs/60) + 'm ago'}</td>
+      <td><button class="btn success" onclick="quickAddRig('${r.ip}','${r.hostname}')">+ Add</button></td>
+    </tr>`).join('')}
+  </table>`;
+}
+
+async function quickAddRig(ip, hostname) {
+  const name = prompt('Rig name:', hostname);
+  if (!name) return;
+  try {
+    const res = await fetch('/api/rigs', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, host: ip, ssh_port: 22, ssh_user: 'root' }),
+    });
+    if (res.ok) { alert(`Added ${name} (${ip})`); }
+    else { const err = await res.json(); alert(err.detail); }
+  } catch(e) { alert(e.message); }
+}
+
+// Periodically fetch discovered rigs
+setInterval(async () => {
+  try {
+    const res = await fetch('/api/discovered');
+    const rigs = await res.json();
+    renderDiscovered(rigs);
+  } catch(e) {}
+}, 15000);
+
+// ── Target picker (dropdown instead of prompt) ──
+
+function pickTarget(title) {
+  return new Promise(resolve => {
+    const rigs = Object.keys(rigData);
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:300;display:flex;justify-content:center;align-items:center';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;min-width:320px';
+    box.innerHTML = `<h3 style="margin-bottom:16px;font-size:15px">${title}</h3>
+      <select id="pick-target" style="width:100%;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;margin-bottom:16px">
+        <option value="all">All Rigs</option>
+        ${rigs.map(n => `<option value="${n}">${n} (${rigData[n].host})</option>`).join('')}
+      </select>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="pick-cancel">Cancel</button>
+        <button class="btn success" id="pick-ok">Apply</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(null); }});
+    box.querySelector('#pick-cancel').onclick = () => { document.body.removeChild(overlay); resolve(null); };
+    box.querySelector('#pick-ok').onclick = () => {
+      const val = box.querySelector('#pick-target').value;
+      document.body.removeChild(overlay);
+      resolve(val);
+    };
+  });
+}
+
+// Solo checkbox toggle
+document.getElementById('fs-solo').addEventListener('change', e => {
+  document.getElementById('fs-solo-fields').style.display = e.target.checked ? 'grid' : 'none';
+});
+
+// Keyboard shortcut
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
+
+// Start
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeowOS</title>
+<style>
+:root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --dim: #8b949e; --accent: #f97316; --green: #3fb950; --red: #f85149; --blue: #58a6ff; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.header { background: var(--card); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header h1 span { color: var(--accent); }
+.header .info { color: var(--dim); font-size: 13px; }
+.tabs { display: flex; gap: 0; background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px; }
+.tab { padding: 10px 20px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; font-size: 14px; }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--text); }
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+.card h2 { font-size: 16px; margin-bottom: 12px; color: var(--accent); }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 4px; }
+.form-group input, .form-group select { width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 14px; }
+.form-group select { appearance: auto; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.btn { padding: 10px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #ea580c; }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-secondary { background: var(--border); color: var(--text); }
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.gpu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.gpu-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px; }
+.gpu-card .gpu-name { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.gpu-card .gpu-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; }
+.gpu-card .stat-label { color: var(--dim); }
+.gpu-card .stat-value { text-align: right; font-weight: 500; }
+.temp-cool { color: var(--green); }
+.temp-warm { color: var(--accent); }
+.temp-hot { color: var(--red); }
+.summary-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.summary-item { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 14px; text-align: center; }
+.summary-item .value { font-size: 24px; font-weight: 700; color: var(--accent); }
+.summary-item .label { font-size: 11px; color: var(--dim); margin-top: 2px; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-mining { background: var(--green); }
+.status-idle { background: var(--accent); }
+.status-offline { background: var(--red); }
+.log-box { background: #000; border: 1px solid var(--border); border-radius: 4px; padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; color: #ccc; }
+.solo-fields { display: none; }
+.solo-fields.visible { display: block; }
+.hidden { display: none; }
+.actions { display: flex; gap: 8px; margin-top: 12px; }
+.wizard-hero { text-align: center; padding: 40px 20px; }
+.wizard-hero h2 { font-size: 28px; margin-bottom: 8px; }
+.wizard-hero p { color: var(--dim); font-size: 15px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Meow</span>OS</h1>
+  <div class="info" id="rig-info">Loading...</div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="dashboard" id="tab-dashboard">Dashboard</div>
+  <div class="tab" data-tab="setup" id="tab-setup">Mining Setup</div>
+  <div class="tab" data-tab="settings" id="tab-settings">Settings</div>
+  <div class="tab" data-tab="logs" id="tab-logs">Logs</div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="container tab-content" id="page-dashboard">
+  <div class="summary-bar" id="summary-bar"></div>
+  <div class="card">
+    <h2>GPUs</h2>
+    <div class="gpu-grid" id="gpu-grid"></div>
+  </div>
+</div>
+
+<!-- SETUP WIZARD -->
+<div class="container tab-content hidden" id="page-setup">
+  <div class="card">
+    <h2>Mining Configuration</h2>
+    <div class="form-group">
+      <label>Miner</label>
+      <select id="fs-miner" onchange="onMinerChange()">
+        <option value="">-- Select Miner --</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Algorithm</label>
+      <select id="fs-algo"><option value="">-- Select miner first --</option></select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Pool URL</label>
+        <input id="fs-pool" placeholder="stratum+tcp://pool.example.com:3333">
+      </div>
+      <div class="form-group">
+        <label>Wallet Address</label>
+        <input id="fs-wallet" placeholder="Your wallet address">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Worker Name</label>
+        <input id="fs-worker" placeholder="%HOSTNAME%">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input id="fs-password" placeholder="x" value="x">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Extra Arguments</label>
+      <input id="fs-extra" placeholder="--intensity 15">
+    </div>
+    <div class="form-group">
+      <label><input type="checkbox" id="fs-solo" onchange="toggleSolo()"> Solo Mining (direct to node)</label>
+    </div>
+    <div class="solo-fields" id="solo-fields">
+      <div class="form-row">
+        <div class="form-group">
+          <label>RPC User</label>
+          <input id="fs-rpc-user" placeholder="rpcuser">
+        </div>
+        <div class="form-group">
+          <label>RPC Password</label>
+          <input id="fs-rpc-pass" placeholder="rpcpassword">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Coinbase Address</label>
+        <input id="fs-coinbase" placeholder="Address for block rewards">
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="applyConfig()">Start Mining</button>
+      <button class="btn btn-danger" onclick="stopMining()">Stop Mining</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="container tab-content hidden" id="page-settings">
+  <div class="card">
+    <h2>GPU Overclock</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Core Clock Offset (MHz)</label>
+        <input id="oc-core" type="number" placeholder="0">
+      </div>
+      <div class="form-group">
+        <label>Memory Clock Offset (MHz)</label>
+        <input id="oc-mem" type="number" placeholder="0">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Core Lock (MHz)</label>
+        <input id="oc-lock" type="number" placeholder="0">
+      </div>
+      <div class="form-group">
+        <label>Power Limit (W)</label>
+        <input id="oc-power" type="number" placeholder="0">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Fan Speed (%)</label>
+      <input id="oc-fan" type="number" placeholder="auto">
+    </div>
+    <button class="btn btn-primary" onclick="applyOC()">Apply Overclock</button>
+  </div>
+  <div class="card">
+    <h2>SSH Password</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>New Password</label>
+        <input id="ssh-pw" type="password" placeholder="Enter new password">
+      </div>
+      <div class="form-group" style="display:flex;align-items:flex-end;">
+        <button class="btn btn-secondary" onclick="changePassword()">Change Password</button>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>System</h2>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="restartMiner()">Restart Miner</button>
+      <button class="btn btn-danger" onclick="rebootRig()">Reboot Rig</button>
+    </div>
+  </div>
+</div>
+
+<!-- LOGS -->
+<div class="container tab-content hidden" id="page-logs">
+  <div class="card">
+    <h2>Miner Log</h2>
+    <button class="btn btn-sm btn-secondary" onclick="loadLog()" style="margin-bottom:8px;">Refresh</button>
+    <div class="log-box" id="log-box">Loading...</div>
+  </div>
+</div>
+
+<script>
+let miners = [];
+let pollTimer = null;
+
+// Tabs
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.add('hidden'));
+    t.classList.add('active');
+    document.getElementById('page-' + t.dataset.tab).classList.remove('hidden');
+    if (t.dataset.tab === 'logs') loadLog();
+  });
+});
+
+// API helpers
+async function api(path, opts) {
+  try {
+    const r = await fetch('/api/' + path, opts);
+    return await r.json();
+  } catch (e) { return {}; }
+}
+
+// Load miners list
+async function loadMiners() {
+  miners = await api('miners');
+  const sel = document.getElementById('fs-miner');
+  miners.forEach(m => {
+    const o = document.createElement('option');
+    o.value = m.name; o.textContent = m.display + ' (' + m.gpu + ')';
+    sel.appendChild(o);
+  });
+}
+
+function onMinerChange() {
+  const name = document.getElementById('fs-miner').value;
+  const m = miners.find(x => x.name === name);
+  const algoSel = document.getElementById('fs-algo');
+  algoSel.innerHTML = '';
+  if (m) {
+    m.algos.forEach(a => { const o = document.createElement('option'); o.value = a; o.textContent = a; algoSel.appendChild(o); });
+    document.getElementById('fs-solo').parentElement.style.display = m.solo ? '' : 'none';
+  }
+}
+
+function toggleSolo() {
+  document.getElementById('solo-fields').classList.toggle('visible', document.getElementById('fs-solo').checked);
+}
+
+// Apply mining config
+async function applyConfig() {
+  const fs = {
+    name: 'custom',
+    coin: document.getElementById('fs-algo').value.toUpperCase(),
+    algo: document.getElementById('fs-algo').value,
+    miner: document.getElementById('fs-miner').value,
+    pool_url: document.getElementById('fs-pool').value,
+    wallet: document.getElementById('fs-wallet').value,
+    worker: document.getElementById('fs-worker').value || '%HOSTNAME%',
+    password: document.getElementById('fs-password').value || 'x',
+    extra_args: document.getElementById('fs-extra').value,
+    is_solo: document.getElementById('fs-solo').checked,
+    solo_rpc_user: document.getElementById('fs-rpc-user').value,
+    solo_rpc_pass: document.getElementById('fs-rpc-pass').value,
+    coinbase_addr: document.getElementById('fs-coinbase').value,
+  };
+  await api('config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({flight_sheet: fs}) });
+  alert('Config applied! Miner starting...');
+  document.querySelector('[data-tab="dashboard"]').click();
+}
+
+async function stopMining() {
+  await api('stop-miner', { method: 'POST' });
+  alert('Miner stopped.');
+}
+
+async function restartMiner() {
+  await api('restart-miner', { method: 'POST' });
+  alert('Miner restarting...');
+}
+
+async function rebootRig() {
+  if (confirm('Reboot the rig?')) { await api('reboot', { method: 'POST' }); alert('Rebooting...'); }
+}
+
+async function changePassword() {
+  const pw = document.getElementById('ssh-pw').value;
+  if (!pw) return alert('Enter a password');
+  await api('change-password', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pw}) });
+  alert('Password changed.');
+  document.getElementById('ssh-pw').value = '';
+}
+
+async function applyOC() {
+  const oc = {
+    core_offset: parseInt(document.getElementById('oc-core').value) || 0,
+    mem_offset: parseInt(document.getElementById('oc-mem').value) || 0,
+    core_lock: parseInt(document.getElementById('oc-lock').value) || 0,
+    power_limit: parseInt(document.getElementById('oc-power').value) || 0,
+    fan_speed: parseInt(document.getElementById('oc-fan').value) || 0,
+  };
+  await api('config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({oc_profile: oc}) });
+  alert('Overclock applied.');
+}
+
+async function loadLog() {
+  const d = await api('miner-log');
+  document.getElementById('log-box').textContent = d.log || 'No log data';
+}
+
+// Temperature color
+function tempClass(t) { return t < 65 ? 'temp-cool' : t < 80 ? 'temp-warm' : 'temp-hot'; }
+
+// Poll status
+async function pollStatus() {
+  const d = await api('status');
+  if (!d.hostname) return;
+
+  // Header info
+  document.getElementById('rig-info').textContent = d.hostname + ' | ' + d.ip;
+
+  const stats = d.stats || {};
+  const gpus = stats.gpus || [];
+  const miner = stats.miner || {};
+
+  // If not configured, show setup tab
+  if (!d.configured) {
+    document.querySelector('[data-tab="setup"]').click();
+  }
+
+  // Summary bar
+  const totalHash = miner.hashrate || 0;
+  const totalPower = gpus.reduce((s, g) => s + (g.power_draw || 0), 0);
+  const maxTemp = gpus.reduce((m, g) => Math.max(m, g.temp || 0), 0);
+  const accepted = miner.accepted || 0;
+  const rejected = miner.rejected || 0;
+  const status = miner.hashrate > 0 ? 'mining' : (d.configured ? 'idle' : 'idle');
+
+  document.getElementById('summary-bar').innerHTML = `
+    <div class="summary-item"><div class="value"><span class="status-dot status-${status}"></span>${status.toUpperCase()}</div><div class="label">Status</div></div>
+    <div class="summary-item"><div class="value">${formatHash(totalHash)}</div><div class="label">Hashrate</div></div>
+    <div class="summary-item"><div class="value">${totalPower.toFixed(0)}W</div><div class="label">Power</div></div>
+    <div class="summary-item"><div class="value"><span class="${tempClass(maxTemp)}">${maxTemp}&deg;C</span></div><div class="label">Max Temp</div></div>
+    <div class="summary-item"><div class="value">${accepted} / ${rejected}</div><div class="label">Accept / Reject</div></div>
+  `;
+
+  // GPU grid
+  if (gpus.length === 0) {
+    document.getElementById('gpu-grid').innerHTML = '<p style="color:var(--dim)">No GPU data yet. Waiting for miner to start...</p>';
+  } else {
+    document.getElementById('gpu-grid').innerHTML = gpus.map((g, i) => `
+      <div class="gpu-card">
+        <div class="gpu-name">GPU ${g.index !== undefined ? g.index : i}: ${g.name || 'Unknown'}</div>
+        <div class="gpu-stats">
+          <span class="stat-label">Temp</span><span class="stat-value ${tempClass(g.temp || 0)}">${g.temp || 0}&deg;C</span>
+          <span class="stat-label">Fan</span><span class="stat-value">${g.fan || 0}%</span>
+          <span class="stat-label">Power</span><span class="stat-value">${(g.power_draw || 0).toFixed(0)}W</span>
+          <span class="stat-label">Core</span><span class="stat-value">${g.core_clock || 0} MHz</span>
+          <span class="stat-label">Mem</span><span class="stat-value">${g.mem_clock || 0} MHz</span>
+          <span class="stat-label">Hashrate</span><span class="stat-value">${g.hashrate ? formatHash(g.hashrate) : '-'}</span>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Populate setup form from existing config
+  if (d.configured && !document.getElementById('fs-miner').dataset.loaded) {
+    const cfg = await api('config');
+    const fs = cfg.flight_sheet;
+    if (fs) {
+      document.getElementById('fs-miner').value = fs.miner || '';
+      onMinerChange();
+      document.getElementById('fs-algo').value = fs.algo || '';
+      document.getElementById('fs-pool').value = fs.pool_url || '';
+      document.getElementById('fs-wallet').value = fs.wallet || '';
+      document.getElementById('fs-worker').value = fs.worker || '';
+      document.getElementById('fs-password').value = fs.password || 'x';
+      document.getElementById('fs-extra').value = fs.extra_args || '';
+      document.getElementById('fs-solo').checked = fs.is_solo || false;
+      toggleSolo();
+      if (fs.is_solo) {
+        document.getElementById('fs-rpc-user').value = fs.solo_rpc_user || '';
+        document.getElementById('fs-rpc-pass').value = fs.solo_rpc_pass || '';
+        document.getElementById('fs-coinbase').value = fs.coinbase_addr || '';
+      }
+      document.getElementById('fs-miner').dataset.loaded = '1';
+    }
+  }
+}
+
+function formatHash(h) {
+  if (h >= 1e12) return (h/1e12).toFixed(2) + ' TH/s';
+  if (h >= 1e9) return (h/1e9).toFixed(2) + ' GH/s';
+  if (h >= 1e6) return (h/1e6).toFixed(2) + ' MH/s';
+  if (h >= 1e3) return (h/1e3).toFixed(2) + ' KH/s';
+  return h.toFixed(2) + ' H/s';
+}
+
+// Init
+loadMiners();
+pollStatus();
+pollTimer = setInterval(pollStatus, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+[Unit]
+Description=MeowOS XMRig CPU Miner
+After=network-online.target mfarm-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -c 'sed -i "s/%%HOSTNAME%%/$(hostname)/g" /opt/mfarm/miners/xmrig-config.json'
+ExecStart=/opt/mfarm/miners/xmrig --config=/opt/mfarm/miners/xmrig-config.json --no-color
+Restart=always
+RestartSec=15
+Nice=10
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

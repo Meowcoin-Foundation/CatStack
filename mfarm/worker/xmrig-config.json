@@ -1,0 +1,25 @@
+{
+    "autosave": false,
+    "donate-level": 0,
+    "donate-over-proxy": 0,
+    "cpu": true,
+    "opencl": false,
+    "cuda": false,
+    "pools": [
+        {
+            "url": "",
+            "user": "",
+            "pass": "%HOSTNAME%",
+            "keepalive": true,
+            "tls": false
+        }
+    ],
+    "http": {
+        "enabled": true,
+        "host": "0.0.0.0",
+        "port": 44445,
+        "access-token": null,
+        "restricted": false
+    },
+    "log-file": "/var/log/mfarm/xmrig.log"
+}
