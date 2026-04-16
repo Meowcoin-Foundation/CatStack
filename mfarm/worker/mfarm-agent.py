@@ -749,6 +749,11 @@ class MinerManager:
         """Apply OC settings before starting the miner."""
         oc = self.config.oc_profile
         if not oc:
+            # Still run apply-oc.sh if it exists (persists OC across flight sheet changes)
+            if Path("/opt/mfarm/apply-oc.sh").exists():
+                log.info("Running apply-oc.sh to restore OC")
+                subprocess.run(["sudo", "bash", "/opt/mfarm/apply-oc.sh"],
+                               capture_output=True, timeout=30)
             return
 
         log.info("Applying OC profile: %s", oc.get("name", "unnamed"))
