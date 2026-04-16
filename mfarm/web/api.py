@@ -547,8 +547,9 @@ def get_discovered():
     existing = {r.host for r in Rig.get_all(db)}
     result = []
     for mac, info in _discovered_rigs.items():
+        if info["ip"] in existing:
+            continue  # Already added - don't show
         info_copy = dict(info)
-        info_copy["already_added"] = info["ip"] in existing
         info_copy["age_secs"] = round(time.time() - info.get("last_seen", 0))
         result.append(info_copy)
     return result
