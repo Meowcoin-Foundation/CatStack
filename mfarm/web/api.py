@@ -410,13 +410,16 @@ async def apply_oc_profile(oc_name: str, target: str):
             rig.save(db)
 
             # Build the OC apply script that persists through reboots
-            oc_script = '#!/bin/bash\nsleep 5\nkillall Xorg 2>/dev/null\nnohup Xorg :0 -config /etc/X11/xorg.conf > /dev/null 2>&1 &\nsleep 4\nexport DISPLAY=:0\n'
+            oc_script = '#!/bin/bash\nnvidia-smi -pm 1 > /dev/null 2>&1\n'
+            oc_script += '# Try X for nvidia-settings, fall back gracefully\n'
+            oc_script += 'if ! pgrep -x Xorg > /dev/null; then\n'
+            oc_script += '  nohup Xorg :0 -config /etc/X11/xorg.conf > /dev/null 2>&1 &\n  sleep 3\nfi\nexport DISPLAY=:0\n'
             oc_script += 'GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)\n'
             oc_script += 'for i in $(seq 0 $((GPU_COUNT-1))); do\n'
             if profile.core_offset is not None:
-                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={profile.core_offset}" > /dev/null 2>&1\n'
+                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={profile.core_offset}" > /dev/null 2>&1 || true\n'
             if profile.mem_offset is not None:
-                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={profile.mem_offset}" > /dev/null 2>&1\n'
+                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={profile.mem_offset}" > /dev/null 2>&1 || true\n'
             if profile.core_lock is not None:
                 oc_script += f'  nvidia-smi -i $i -lgc {profile.core_lock},{profile.core_lock} > /dev/null 2>&1\n'
             if profile.mem_lock is not None:
