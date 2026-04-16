@@ -27,7 +27,7 @@ which debootstrap >/dev/null 2>&1 || {
 
 # [1/7] Create image
 echo "[1/7] Creating 6GB image..."
-dd if=/dev/zero of="$IMG" bs=1M count=6144 status=progress
+dd if=/dev/zero of="$IMG" bs=1M count=10240 status=progress
 
 # [2/7] Partition
 echo "[2/7] Partitioning..."
@@ -127,6 +127,12 @@ apt-get install -y \
     sudo locales iproute2 iputils-ping netplan.io \
     xserver-xorg-core xinit x11-xserver-utils \
     cloud-guest-utils gdisk
+
+# NVIDIA drivers baked into image - no network needed on first boot
+add-apt-repository -y ppa:graphics-drivers/ppa
+apt-get update -qq
+apt-get install -y nvidia-driver-570
+echo "NVIDIA driver installed: $(dpkg -l nvidia-driver-570 | grep ^ii | awk '{print $3}')"
 
 # Verify r8169 is present
 KVER=$(ls /lib/modules/ | sort -V | tail -1)
@@ -257,7 +263,7 @@ set -uo pipefail
 mkdir -p /var/run/mfarm /var/log/mfarm
 LOG="/var/log/mfarm/firstboot.log"
 MARKER="/opt/mfarm/.firstboot-done"
-TOTAL=7
+TOTAL=6
 STEP=0
 
 show() {
@@ -296,16 +302,10 @@ resize2fs "$ROOT_DEV" >> "$LOG" 2>&1 || true
 show "Connecting to network"
 for i in $(seq 1 30); do ping -c 1 -W 2 8.8.8.8 &>/dev/null && break; sleep 2; done
 
-show "Installing NVIDIA drivers (this takes a few minutes)"
-apt-get update -qq >> "$LOG" 2>&1
+show "Configuring NVIDIA GPU"
 if lspci | grep -qi nvidia; then
-    apt-get install -y -qq software-properties-common >> "$LOG" 2>&1
-    add-apt-repository -y ppa:graphics-drivers/ppa >> "$LOG" 2>&1
-    apt-get update -qq >> "$LOG" 2>&1
-    apt-get install -y -qq ubuntu-drivers-common >> "$LOG" 2>&1
-    RECOMMENDED=$(ubuntu-drivers devices 2>/dev/null | grep "recommended" | head -1 | awk '{print $3}')
-    [[ -n "$RECOMMENDED" ]] && apt-get install -y -qq "$RECOMMENDED" >> "$LOG" 2>&1 || apt-get install -y -qq nvidia-driver-580-open >> "$LOG" 2>&1
     nvidia-smi -pm 1 >> "$LOG" 2>&1 || true
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration >> "$LOG" 2>&1 || true
 fi
 sensors-detect --auto >> "$LOG" 2>&1 || true
 
