@@ -93,14 +93,57 @@ network:
     all-en:
       match: { name: "en*" }
       dhcp4: true
+      dhcp4-overrides:
+        use-dns: true
+        send-hostname: true
     all-eth:
       match: { name: "eth*" }
       dhcp4: true
+      dhcp4-overrides:
+        use-dns: true
+        send-hostname: true
     all-other:
       match: { driver: "*" }
       dhcp4: true
       optional: true
 EOF
+chmod 600 "$MNT/etc/netplan/01-mfarm.yaml"
+
+# Aggressive DHCP retry service - runs on boot, keeps trying until IP is obtained
+cat > "$MNT/opt/mfarm/dhcp-forcer.sh" <<'DHCPSH'
+#!/bin/bash
+# Force DHCP on all ethernet interfaces at boot
+# If DHCP times out in netplan, this retries more aggressively
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if ip -4 addr show 2>/dev/null | grep -qE 'inet (192|10|172)\.'; then
+        logger "dhcp-forcer: got IP on attempt $attempt"
+        exit 0
+    fi
+    for iface in $(ls /sys/class/net/ | grep -E '^(eth|en)' | head -5); do
+        ip link set "$iface" up 2>/dev/null
+        dhclient -4 -v "$iface" -timeout 30 2>&1 | logger -t dhcp-forcer &
+    done
+    sleep 10
+done
+exit 1
+DHCPSH
+chmod +x "$MNT/opt/mfarm/dhcp-forcer.sh"
+
+cat > "$MNT/etc/systemd/system/dhcp-forcer.service" <<'DHCPSVC'
+[Unit]
+Description=Aggressive DHCP retry at boot
+After=network.target systemd-networkd.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mfarm/dhcp-forcer.sh
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
+DHCPSVC
 
 mount --bind /dev "$MNT/dev" 2>/dev/null || true
 mount --bind /dev/pts "$MNT/dev/pts" 2>/dev/null || true
@@ -126,7 +169,7 @@ apt-get install -y \
     software-properties-common ubuntu-drivers-common \
     sudo locales iproute2 iputils-ping netplan.io \
     xserver-xorg-core xinit x11-xserver-utils \
-    cloud-guest-utils gdisk
+    cloud-guest-utils gdisk isc-dhcp-client
 
 # Verify r8169 is present
 KVER=$(ls /lib/modules/ | sort -V | tail -1)
@@ -389,6 +432,7 @@ WantedBy=multi-user.target
 FBSVC
 
 chroot "$MNT" systemctl enable mfarm-firstboot.service
+chroot "$MNT" systemctl enable dhcp-forcer.service 2>/dev/null || true
 
 # Cleanup
 chroot "$MNT" apt-get clean
