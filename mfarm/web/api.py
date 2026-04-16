@@ -449,7 +449,7 @@ async def apply_oc_profile(oc_name: str, target: str):
 
             # Apply now
             await loop.run_in_executor(
-                _executor, lambda r=rig: pool.exec(r, "bash /opt/mfarm/apply-oc.sh", timeout=30)
+                _executor, lambda r=rig: pool.exec(r, "sudo bash /opt/mfarm/apply-oc.sh", timeout=30)
             )
 
             results[rig.name] = "applied (persists on reboot)"
