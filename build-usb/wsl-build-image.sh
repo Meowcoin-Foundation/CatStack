@@ -131,7 +131,7 @@ apt-get install -y \
 # NVIDIA drivers baked into image - no network needed on first boot
 add-apt-repository -y ppa:graphics-drivers/ppa
 apt-get update -qq
-apt-get install -y nvidia-driver-570
+apt-get install -y --no-install-recommends nvidia-driver-570
 echo "NVIDIA driver installed: $(dpkg -l nvidia-driver-570 | grep ^ii | awk '{print $3}')"
 
 # Verify r8169 is present
