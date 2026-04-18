@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MFarm Miner Wrapper - launches miner with logging and crash recovery
+# CatStack Miner Wrapper - launches miner with logging and crash recovery
 # This is called by the agent but can also be used standalone for testing.
 #
 # Usage: miner-wrapper.sh <config-path>
@@ -77,8 +77,14 @@ case "$MINER" in
             --pass "$PASSWORD" --apiport="$API_PORT" $EXTRA_ARGS
         ;;
     xmrig)
+        # --log-file + --http-access-token match the agent's direct-launch path
+        # so CPU-slot XMRig behaves identically to GPU-slot XMRig for logging
+        # and API access. Without these, miner.log stays empty and the
+        # dashboard gets 401s querying /1/summary.
         exec "$BINARY" -a "$ALGO" -o "$POOL" -u "$WALLET.$WORKER" -p "$PASSWORD" \
-            --http-host=0.0.0.0 --http-port="$API_PORT" $EXTRA_ARGS
+            --http-host=0.0.0.0 --http-port="$API_PORT" \
+            --http-access-token=meowfarm --http-no-restricted \
+            --no-color --log-file="$LOG_DIR/cpu-miner.log" $EXTRA_ARGS
         ;;
     srbminer)
         exec "$BINARY" --algorithm "$ALGO" --pool "$POOL" --wallet "$WALLET" \
@@ -86,8 +92,22 @@ case "$MINER" in
             --api-enable --api-port "$API_PORT" $EXTRA_ARGS
         ;;
     miniz)
-        exec "$BINARY" --algo "$ALGO" --url "$WALLET@$POOL" \
+        # Worker name goes in the stratum username as WALLET.WORKER — miniZ
+        # does NOT parse it out of --url, the dot-delimited form IS the
+        # stratum user. Without this every rig shows up as one anon worker.
+        exec "$BINARY" --algo "$ALGO" --url "$WALLET.$WORKER@$POOL" \
             --telemetry="$API_PORT" --pers auto $EXTRA_ARGS
+        ;;
+    kerrigan)
+        # Custom Equihash192,7 miner — launcher script spawns one mine.py +
+        # kerrigan_v4 daemon per GPU. Pool is "host:port"; split for the script.
+        HOST="${POOL%%:*}"
+        PORT="${POOL##*:}"
+        [[ "$PORT" == "$HOST" ]] && PORT=3202  # no ":port" in pool string
+        if [[ "$BINARY" != *multi_gpu.sh ]]; then
+            BINARY="$BINARY/multi_gpu.sh"
+        fi
+        exec "$BINARY" "$WALLET" "$WORKER" "$HOST" "$PORT"
         ;;
     *)
         echo "Unknown miner: $MINER"

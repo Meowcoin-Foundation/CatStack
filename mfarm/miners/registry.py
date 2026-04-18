@@ -140,6 +140,23 @@ _register(MinerDefinition(
 
 
 _register(MinerDefinition(
+    name="kerrigan",
+    display_name="Kerrigan (custom Equihash192,7)",
+    # Kerrigan's launcher is multi_gpu.sh, which spawns one mine.py + kerrigan_v4
+    # daemon per GPU. We point binary_name at the launcher so miner_paths lookup
+    # finds /opt/mfarm/miners/kerrigan/multi_gpu.sh.
+    binary_name="kerrigan/multi_gpu.sh",
+    supported_algos=["equihash192_7"],
+    gpu_type="nvidia",
+    # No HTTP/TCP API — the agent parses /var/log/mfarm/miner.log instead
+    # (mine.py's stdout has per-GPU "XX.X I/s = YY.Y Sol/s" lines).
+    api_type="kerrigan_log",
+    default_api_port=0,
+    supports_solo=False,
+))
+
+
+_register(MinerDefinition(
     name="srbminer",
     display_name="SRBMiner-Multi",
     binary_name="SRBMiner-Multi",

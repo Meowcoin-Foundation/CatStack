@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MFarm Worker Agent - Deployed to each mining rig.
+CatStack Worker Agent - Deployed to each mining rig.
 Handles stats collection, miner process management, watchdog, and OC application.
 Zero external dependencies - stdlib only.
 """
@@ -57,7 +57,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-log = logging.getLogger("meowfarm-agent")
+log = logging.getLogger("catstack-agent")
 
 
 class Config:
@@ -500,6 +500,7 @@ def query_xmrig_api(port: int) -> dict | None:
             "algo": data.get("algo", ""),
             "uptime_secs": data.get("uptime", 0),
             "hashrate_units": "H/s",
+            "version": data.get("version", ""),
         }
     except Exception:
         return None
@@ -556,6 +557,12 @@ def query_miniz_api(port: int) -> dict | None:
         algo_m = _re.search(r"data-label='algo:'>([^<]+)", html)
         algo = algo_m.group(1).strip() if algo_m else "equihash"
 
+        # miniZ renders its version in the page title — e.g. "miniZv2.5e3@host"
+        # (no space between the name and the version in the <title> tag).
+        # The console banner does use a space ("miniZ v2.5e3"), so match both.
+        ver_m = _re.search(r"miniZ\s*v([\d][\w\.-]*)", html, _re.IGNORECASE)
+        version = ver_m.group(1) if ver_m else ""
+
         # Uptime
         uptime_m = _re.search(r"data-label='uptime:'[^>]*>\s*(\d+)\s*days?\s+(\d+):(\d+):(\d+)", html)
         uptime_secs = 0
@@ -571,9 +578,67 @@ def query_miniz_api(port: int) -> dict | None:
             "uptime_secs": uptime_secs,
             "hashrate_units": "Sol/s",
             "gpu_stats": gpu_stats,
+            "version": version,
         }
     except Exception:
         return None
+
+
+def query_kerrigan_log(port: int) -> dict | None:
+    """Parse kerrigan (custom equihash192,7) stats from /var/log/mfarm/miner.log.
+
+    Kerrigan has no HTTP/TCP API — the miner is multi_gpu.sh, which pipes
+    per-GPU mine.py output (`[gpuN] [mine] XX.X I/s = YY.Y Sol/s (accepted=A rejected=R)`)
+    through `sed` into miner.log. We take the MOST RECENT line per GPU and
+    sum the Sol/s values.
+
+    The `port` arg is unused — signature matches the other parsers.
+    """
+    import re
+    try:
+        with open(MINER_LOG_PATH) as f:
+            lines = f.readlines()[-400:]  # ~30-40s of output at 6 GPUs × 2s/emit
+    except OSError:
+        return None
+
+    # Per-GPU state: keep the last seen reading per gpu index
+    #   [gpu3] [mine] 45.6 I/s = 91.3 Sol/s (accepted=40 rejected=0)
+    line_re = re.compile(
+        r"\[gpu(\d+)\]\s+\[mine\]\s+([\d.]+)\s*I/s\s*=\s*([\d.]+)\s*Sol/s"
+        r"\s*\(accepted=(\d+)\s*rejected=(\d+)\)"
+    )
+    latest: dict[int, dict] = {}
+    for line in lines:
+        m = line_re.search(line)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        latest[idx] = {
+            "gpu_index": idx,
+            "hashrate": float(m.group(3)),        # Sol/s
+            "ips": float(m.group(2)),              # iters/s (informational)
+            "accepted": int(m.group(4)),
+            "rejected": int(m.group(5)),
+        }
+
+    if not latest:
+        return None
+
+    gpu_stats = [latest[i] for i in sorted(latest)]
+    total_sol = sum(g["hashrate"] for g in gpu_stats)
+    total_acc = sum(g["accepted"] for g in gpu_stats)
+    total_rej = sum(g["rejected"] for g in gpu_stats)
+
+    return {
+        "hashrate": total_sol,
+        "accepted": total_acc,
+        "rejected": total_rej,
+        "algo": "equihash192_7",
+        "uptime_secs": 0,  # agent already tracks process uptime separately
+        "hashrate_units": "Sol/s",
+        "gpu_stats": gpu_stats,
+        "version": "v4",
+    }
 
 
 API_PARSERS = {
@@ -582,6 +647,7 @@ API_PARSERS = {
     "lolminer_http": query_lolminer_api,
     "xmrig_http": query_xmrig_api,
     "miniz_http": query_miniz_api,
+    "kerrigan_log": query_kerrigan_log,
 }
 
 # Miner name to API type mapping
@@ -595,6 +661,7 @@ MINER_API_TYPES = {
     "xmrig": "xmrig_http",
     "miniz": "miniz_http",
     "miniZ": "miniz_http",
+    "kerrigan": "kerrigan_log",
 }
 
 
@@ -623,6 +690,82 @@ def parse_ccminer_log_hashrates() -> list[dict]:
         return [{"gpu_index": idx, "hashrate": hr} for idx, hr in sorted(gpu_hr.items())]
     except Exception:
         return []
+
+
+# Cache: miner binary path -> (mtime, detected version). Re-detect on change.
+_version_cache: dict[str, tuple[float, str]] = {}
+
+
+def detect_miner_version(miner_name: str, binary_path: str | None) -> str:
+    """Best-effort: run `<binary> --version` and parse a version string out.
+
+    Cached per (binary path, mtime) so we only exec once per binary unless
+    the file changes. Returns "" if the binary is missing or unreadable.
+    """
+    import os
+    import re
+
+    if not binary_path or not os.path.exists(binary_path):
+        return ""
+
+    try:
+        mtime = os.path.getmtime(binary_path)
+    except OSError:
+        return ""
+
+    cached = _version_cache.get(binary_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    # Different miners expose version via different flags; try the usual suspects
+    # and stop at the first one that produces recognisable output.
+    name = miner_name.lower()
+    candidates = {
+        "ccminer":      ["--version"],
+        "cpuminer":     ["--version"],
+        "cpuminer-opt": ["--version"],
+        "xmrig":        ["--version"],
+        "trex":         ["--version"],
+        "t-rex":        ["--version"],
+        "lolminer":     ["--version"],
+        "miniz":        ["--version", "-v"],
+        "srbminer":     ["--version"],
+    }.get(name, ["--version", "-v", "-V"])
+
+    # miniZ/lolMiner print colour escapes; strip them when matching
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    # Patterns that match "v1.2.3", "1.2.3", "v2.5e3", "0.26.8-abc" etc.
+    version_patterns = [
+        re.compile(r"\bv?(\d+\.\d+[\.\w-]*)", re.IGNORECASE),
+    ]
+
+    for flag in candidates:
+        try:
+            proc = subprocess.run(
+                [binary_path, flag],
+                capture_output=True, text=True, timeout=5,
+                errors="replace",
+            )
+        except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired, OSError):
+            continue
+
+        blob = ansi_re.sub("", (proc.stdout or "") + "\n" + (proc.stderr or ""))
+        # Limit search to the first 20 lines - avoids matching version-ish strings
+        # elsewhere in --help output
+        head = "\n".join(blob.splitlines()[:20])
+
+        for pat in version_patterns:
+            m = pat.search(head)
+            if m:
+                version = m.group(1)
+                # Guard against obvious non-versions like "0.0" from help text
+                if any(c.isdigit() for c in version) and len(version) <= 30:
+                    _version_cache[binary_path] = (mtime, version)
+                    return version
+
+    # Give up but cache the null result so we don't keep spawning subprocesses
+    _version_cache[binary_path] = (mtime, "")
+    return ""
 
 
 def query_miner_stats(miner_name: str, api_port: int) -> dict | None:
@@ -749,16 +892,37 @@ class MinerManager:
                    f"--apiport={port}"]
 
         elif miner == "xmrig":
+            # --no-color: keep miner.log readable by the dashboard.
+            # --log-file: XMRig buffers stdout unreliably, so route logging
+            # directly to miner.log where agent + UI expect it.
+            # --http-access-token: matches the "Bearer meowfarm" the agent's
+            # query_xmrig_api sends. Without it the API returns 401 and the
+            # dashboard can't read hashrate.
             wallet_worker = f"{wallet}.{worker}"
             cmd = [binary, "-a", algo, "-o", pool, "-u", wallet_worker,
-                   "-p", password, f"--http-host=0.0.0.0", f"--http-port={port}"]
+                   "-p", password, f"--http-host=0.0.0.0", f"--http-port={port}",
+                   "--http-access-token=meowfarm", "--http-no-restricted",
+                   "--no-color", "--log-file=/var/log/mfarm/miner.log"]
 
-        elif miner in ("miniz", "miniZ", "miniZ"):
-            # miniZ uses --algo N,K --url wallet@pool:port --telemetry=PORT
+        elif miner in ("miniz", "miniZ"):
+            # miniZ uses --algo N,K --url WALLET.WORKER@pool:port --telemetry=PORT
+            # The dot-delimited "WALLET.WORKER" IS the stratum username —
+            # without it every rig shows up as the same anon worker.
             algo_param = algo.replace("equihash", "").replace("_", ",")
+            stratum_user = f"{wallet}.{worker}" if worker else wallet
             cmd = [binary, "--algo", algo_param,
-                   "--url", f"{wallet}@{pool}",
+                   "--url", f"{stratum_user}@{pool}",
                    f"--telemetry={port}"]
+
+        elif miner == "kerrigan":
+            # Kerrigan's launcher is multi_gpu.sh <wallet> <worker> <host> <port>.
+            # Pool URL comes in as "pooly.ca:3202" — split it for the script.
+            # If `binary` points to the script directly, use it; otherwise fall
+            # back to the conventional install path.
+            host, _, port_str = pool.partition(":")
+            port_str = port_str or "3202"
+            launcher = binary if binary.endswith("multi_gpu.sh") else f"{binary}/multi_gpu.sh"
+            cmd = [launcher, wallet, worker, host, port_str]
 
         else:
             # Generic fallback
@@ -847,6 +1011,7 @@ class MinerManager:
         "ccminer", "miniZ", "miniz", "lolMiner", "lolminer",
         "t-rex", "trex", "gminer", "miner", "nbminer", "teamredminer",
         "phoenixminer", "ethminer", "kawpowminer", "wildrig-multi",
+        "kerrigan_v4",  # our custom Equihash192,7 miner
     ]
     # CPU miner binary names (kept alive during dual mining)
     CPU_MINER_BINARIES = ["xmrig", "cpuminer", "cpuminer-opt"]
@@ -1056,11 +1221,15 @@ class Agent:
         self.zero_hashrate_count = 0
 
     def run(self):
-        log.info("MeowFarm Agent v%s starting on %s", VERSION, socket.gethostname())
+        log.info("CatStack Agent v%s starting on %s", VERSION, socket.gethostname())
         self.config.load()
 
-        # Start miner if flight sheet is configured
-        if self.config.flight_sheet:
+        # Start miner if ANY flight sheet is configured (GPU or CPU-only).
+        # Before this was `if self.config.flight_sheet` which skipped startup
+        # on CPU-only rigs (e.g. mini02 running just XMRig via
+        # cpu_flight_sheet) — their cpu_flight_sheet was loaded but never
+        # actioned until a manual restart_miner command came in.
+        if self.config.flight_sheet or self.config.cpu_flight_sheet:
             self.miner.start()
 
         # Run stats and watchdog on separate timers
@@ -1135,7 +1304,7 @@ class Agent:
             self.config.load()
             self.miner.stop()
             time.sleep(2)
-            if self.config.flight_sheet:
+            if self.config.flight_sheet or self.config.cpu_flight_sheet:
                 self.miner.start()
         elif cmd == "update_agent":
             log.info("Agent update requested, restarting via systemd...")
@@ -1164,10 +1333,16 @@ class Agent:
         if self.config.flight_sheet:
             fs = self.config.flight_sheet
             managed = self.miner.is_running()
-            api_stats = query_miner_stats(fs.get("miner", ""), self.miner.api_port)
+            miner_name = fs.get("miner", "")
+            api_stats = query_miner_stats(miner_name, self.miner.api_port)
+            # Prefer explicit miner_version from the flight sheet, else detect
+            # it from the actual binary on disk.
+            version = fs.get("miner_version") or detect_miner_version(
+                miner_name, self.config.miner_paths.get(miner_name)
+            )
             miner_stats = {
-                "name": fs.get("miner", ""),
-                "version": fs.get("miner_version", ""),
+                "name": miner_name,
+                "version": version,
                 "algo": fs.get("algo", ""),
                 "pool": fs.get("pool_url", ""),
                 "pid": self.miner.get_pid(),
@@ -1175,7 +1350,15 @@ class Agent:
                 "restarts": self.miner.total_restarts,
             }
             if api_stats:
+                # API-reported version is usually more authoritative (e.g. a
+                # subversion the binary wouldn't print via --version). Only
+                # overwrite when the API actually supplies one.
+                api_version = api_stats.pop("version", None) if isinstance(api_stats, dict) else None
                 miner_stats.update(api_stats)
+                if api_version:
+                    miner_stats["version"] = api_version
+                elif version:
+                    miner_stats["version"] = version
 
                 # Merge per-GPU hashrate from miner API into GPU stats
                 gpu_api = api_stats.get("gpu_stats", [])
@@ -1197,6 +1380,12 @@ class Agent:
             if xmrig_data:
                 cpu_miner_stats = xmrig_data
                 cpu_miner_stats["running"] = True
+                # Populate CPU miner version - prefer the one the XMRig API
+                # returned, fall back to `xmrig --version` on the binary.
+                if not cpu_miner_stats.get("version"):
+                    cpu_miner_stats["version"] = detect_miner_version(
+                        "xmrig", self.config.miner_paths.get("xmrig")
+                    )
                 # Ping CPU pool
                 xmrig_config_path = Path("/opt/mfarm/miners/xmrig-config.json")
                 if xmrig_config_path.exists():
