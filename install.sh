@@ -152,5 +152,8 @@ menu() {
     esac
 }
 
+# Ensure interactive prompts work even when piped (curl | bash)
+exec </dev/tty
+
 print_logo
 menu
