@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +35,11 @@ jobs:
 
       - name: Generate checksums
         run: sha256sum meowos-*.img.xz > SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'meowos-*.img.xz'
 
       - name: Upload to Supabase Storage
         run: |

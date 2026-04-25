@@ -29,4 +29,4 @@ qp         t\io,_           `~"TOOggQV""""        _,dg,_ =PIQHib.
 
 # CatStack
 
-MIT License
+Apache-2.0 License
