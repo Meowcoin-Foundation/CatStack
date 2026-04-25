@@ -59,19 +59,22 @@ jobs:
         with:
           subject-path: 'meowos-*.img.xz'
 
-      - name: Upload to Supabase Storage
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
           upload() {
             local file="$1"
             local path="$2"
-            local content_type="${3:-application/octet-stream}"
-            curl -fsSL \
-              -X PUT \
-              -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-              -H "Content-Type: ${content_type}" \
-              -H "x-upsert: true" \
-              -T "${file}" \
-              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${path}"
+            local content_type="${3:-}"
+            local ct_flag=()
+            [[ -n "${content_type}" ]] && ct_flag=(--content-type "${content_type}")
+            aws s3 cp "${file}" "s3://catstack/${PREFIX}${path}" \
+              --endpoint-url https://207a9f0d3bb74f3cf66daa91c5ed74c9.r2.cloudflarestorage.com \
+              --no-progress \
+              "${ct_flag[@]}"
           }
 
           FILENAME="meowos-${LABEL}.img.xz"
@@ -80,7 +83,6 @@ jobs:
           upload "${FILENAME}" "${LATEST}"
           upload "SHA256SUMS.txt" "SHA256SUMS.txt" "text/plain"
 
-          # install.sh only changes on stable releases
           if [[ "${CHANNEL}" == "stable" ]]; then
             upload "install.sh" "install.sh" "text/plain"
           fi
@@ -88,14 +90,14 @@ jobs:
           SHA256=$(cut -d' ' -f1 SHA256SUMS.txt)
           printf '{\n  "channel": "%s",\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
             "${CHANNEL}" "${LABEL}" "${FILENAME}" "${SHA256}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${FILENAME}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${LATEST}" \
+            "https://cdn.catstack.sh/${PREFIX}${FILENAME}" \
+            "https://cdn.catstack.sh/${PREFIX}${LATEST}" \
             > manifest-meowos.json
           upload "manifest-meowos.json" "manifest-meowos.json" "application/json"
 
           echo "Published (${CHANNEL}):"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${LATEST}"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}manifest-meowos.json"
+          echo "  https://cdn.catstack.sh/${PREFIX}${LATEST}"
+          echo "  https://cdn.catstack.sh/${PREFIX}manifest-meowos.json"
 
       - name: Upload artifact
         if: env.CHANNEL == 'dev'

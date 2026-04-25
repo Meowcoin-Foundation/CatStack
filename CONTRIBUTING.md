@@ -23,18 +23,18 @@ git add VERSION && git commit -m "Bump version to 1.3.0" && git push
 What happens next:
 1. `auto-tag.yml` sees the VERSION change, creates and pushes tag `v1.3.0`
 2. `build-meowos.yml` and `build-app.yml` are dispatched in parallel
-3. Both builds upload artifacts and manifest JSON files to storage
+3. Both builds upload artifacts and manifest JSON files to `cdn.catstack.sh`
 4. The download website picks up the new manifests automatically
 
 ## Dev builds
 
 Every push to `develop` triggers a full build automatically — no version bump needed.
-Builds are stamped with the short commit hash (e.g. `dev-abc1234`) and land in a
-`dev/` prefix in storage, separate from stable releases.
+Builds are stamped with the short commit hash (e.g. `dev-abc1234`) and land under a
+`dev/` prefix, separate from stable releases.
 
 ```
-stable:  manifest-meowos.json           meowos-v1.3.0.img.xz
-dev:     dev/manifest-meowos.json       dev/meowos-dev-abc1234.img.xz
+stable:  https://cdn.catstack.sh/manifest-meowos.json
+dev:     https://cdn.catstack.sh/dev/manifest-meowos.json
 ```
 
 The manifests include a `"channel"` field (`"stable"` or `"dev"`) so the website
@@ -46,6 +46,9 @@ can tell them apart.
 |----------|--------|
 | `build-meowos.yml` | MeowOS disk image (`.img.xz`) — the mining rig OS |
 | `build-app.yml` | CatStack desktop app for Windows + Linux (PyInstaller) |
+
+Artifacts are uploaded to Cloudflare R2 (`cdn.catstack.sh`) using the AWS S3-compatible
+API. The two required secrets in the repo are `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`.
 
 ## Build provenance
 

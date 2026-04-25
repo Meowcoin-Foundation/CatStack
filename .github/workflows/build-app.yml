@@ -117,25 +117,29 @@ jobs:
             powershell -Command "(Get-FileHash -Algorithm SHA256 '$ASSET').Hash.ToLower() + '  ' + '$ASSET'" > "$ASSET.sha256"
           fi
 
-      - name: Upload to Supabase Storage
+      - name: Upload to R2
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
           upload() {
             local file="$1"
             local path="$2"
-            local content_type="${3:-application/octet-stream}"
-            curl -fsSL \
-              -X PUT \
-              -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
-              -H "Content-Type: ${content_type}" \
-              -H "x-upsert: true" \
-              -T "${file}" \
-              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${path}"
+            local content_type="${3:-}"
+            local ct_flag=()
+            [[ -n "${content_type}" ]] && ct_flag=(--content-type "${content_type}")
+            aws s3 cp "${file}" "s3://catstack/${{ steps.ver.outputs.prefix }}${path}" \
+              --endpoint-url https://207a9f0d3bb74f3cf66daa91c5ed74c9.r2.cloudflarestorage.com \
+              --no-progress \
+              "${ct_flag[@]}"
           }
 
           SUFFIX="${{ matrix.asset_suffix }}"
           EXT="${{ matrix.archive_ext }}"
           CHANNEL="${{ steps.ver.outputs.channel }}"
+          PREFIX="${{ steps.ver.outputs.prefix }}"
 
           if [[ "${CHANNEL}" == "stable" ]]; then
             LATEST="catstack-latest-${SUFFIX}.${EXT}"
@@ -149,14 +153,14 @@ jobs:
           SHA256=$(cut -d' ' -f1 "${ASSET}.sha256")
           printf '{\n  "channel": "%s",\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
             "${CHANNEL}" "${{ steps.ver.outputs.label }}" "${ASSET}" "${SHA256}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${ASSET}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${LATEST}" \
+            "https://cdn.catstack.sh/${PREFIX}${ASSET}" \
+            "https://cdn.catstack.sh/${PREFIX}${LATEST}" \
             > "manifest-app-${SUFFIX}.json"
           upload "manifest-app-${SUFFIX}.json" "manifest-app-${SUFFIX}.json" "application/json"
 
           echo "Published (${CHANNEL}):"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${LATEST}"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}manifest-app-${SUFFIX}.json"
+          echo "  https://cdn.catstack.sh/${PREFIX}${LATEST}"
+          echo "  https://cdn.catstack.sh/${PREFIX}manifest-app-${SUFFIX}.json"
 
       - name: Upload artifact
         if: steps.ver.outputs.channel == 'dev'

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SUPABASE_URL="https://tbxiptvtxvnmtvfgrylj.supabase.co"
-BUCKET="catstack"
+CDN_URL="https://cdn.catstack.sh"
 MFARM_REPO="https://github.com/Meowcoin-Foundation/CatStack"
 
 RESET="\033[0m"
