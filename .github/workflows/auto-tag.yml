@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      actions: write
 
     steps:
       - uses: actions/checkout@v4
@@ -37,9 +38,10 @@ jobs:
           git tag "v${{ steps.version.outputs.value }}"
           git push origin "v${{ steps.version.outputs.value }}"
 
-      - name: Dispatch build workflow
+      - name: Dispatch build workflows
         if: steps.check.outputs.exists == 'false'
         run: |
           gh workflow run build-meowos.yml --ref "v${{ steps.version.outputs.value }}"
+          gh workflow run build-app.yml --ref "v${{ steps.version.outputs.value }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
