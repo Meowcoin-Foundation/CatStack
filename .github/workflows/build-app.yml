@@ -113,7 +113,7 @@ jobs:
             local path="$2"
             local content_type="${3:-application/octet-stream}"
             curl -fsSL \
-              -X POST \
+              -X PUT \
               -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
               -H "Content-Type: ${content_type}" \
               -H "x-upsert: true" \
