@@ -69,9 +69,19 @@ jobs:
           # Install script
           upload "install.sh" "install.sh" "text/plain"
 
+          # Manifest
+          SHA256=$(cut -d' ' -f1 SHA256SUMS.txt)
+          printf '{\n  "version": "%s",\n  "filename": "meowos-v%s.img.xz",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
+            "${VERSION}" "${VERSION}" "${SHA256}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-v${VERSION}.img.xz" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-latest.img.xz" \
+            > manifest-meowos.json
+          upload "manifest-meowos.json" "manifest-meowos.json" "application/json"
+
           echo "Published:"
           echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-latest.img.xz"
           echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/install.sh"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/manifest-meowos.json"
 
       - name: Upload artifact (non-tag builds)
         if: "!startsWith(github.ref, 'refs/tags/')"

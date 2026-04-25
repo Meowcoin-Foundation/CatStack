@@ -105,13 +105,44 @@ jobs:
             powershell -Command "(Get-FileHash -Algorithm SHA256 '$ASSET').Hash.ToLower() + '  ' + '$ASSET'" > "$ASSET.sha256"
           fi
 
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+      - name: Upload to Supabase Storage
+        shell: bash
+        run: |
+          upload() {
+            local file="$1"
+            local path="$2"
+            local content_type="${3:-application/octet-stream}"
+            curl -fsSL \
+              -X POST \
+              -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
+              -H "Content-Type: ${content_type}" \
+              -H "x-upsert: true" \
+              -T "${file}" \
+              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${path}"
+          }
+
+          SUFFIX="${{ matrix.asset_suffix }}"
+          EXT="${{ matrix.archive_ext }}"
+          LATEST="catstack-latest-${SUFFIX}.${EXT}"
+
+          # Versioned copy
+          upload "${ASSET}" "${ASSET}"
+
+          # Latest (always overwritten)
+          upload "${ASSET}" "${LATEST}"
+
+          # Manifest
+          SHA256=$(cut -d' ' -f1 "${ASSET}.sha256")
+          printf '{\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
+            "${{ steps.ver.outputs.version }}" "${ASSET}" "${SHA256}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${ASSET}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${LATEST}" \
+            > "manifest-app-${SUFFIX}.json"
+          upload "manifest-app-${SUFFIX}.json" "manifest-app-${SUFFIX}.json" "application/json"
+
+          echo "Published:"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${LATEST}"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/manifest-app-${SUFFIX}.json"
 
       - name: Upload artifact (non-tag builds)
         if: "!startsWith(github.ref, 'refs/tags/')"
