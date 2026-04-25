@@ -1,10 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the CatStack native desktop app.
+"""PyInstaller spec: CatStack.exe (GUI, no console) + CatStackCLI.exe (console).
+
+Both exes share a single onedir bundle — Python runtime and all dependencies
+are only included once.
 
 Build:
     pyinstaller desktop/CatStack.spec --clean --noconfirm
 
-Output: dist/CatStack/   (onedir bundle; ship the whole folder)
+Output: dist/CatStack/
+    CatStack.exe      double-click to open the dashboard in a chromeless window
+    CatStackCLI.exe   console entry for CLI commands: rig list, status, ...
 """
 from pathlib import Path
 
@@ -12,14 +17,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
 
-# Bundle the FastAPI static UI so Path(__file__).parent / "static" still works
-# inside the frozen binary.
 datas = [
     (str(ROOT / "mfarm" / "web" / "static"), "mfarm/web/static"),
+    # Ship VERSION alongside mfarm/__init__.py so __version__ resolves at runtime.
+    (str(ROOT / "VERSION"), "mfarm"),
 ]
 
-# Some deps load submodules by string name — declare them so PyInstaller
-# can't quietly drop them.
 hiddenimports = (
     collect_submodules("uvicorn")
     + collect_submodules("uvicorn.protocols")
@@ -38,7 +41,6 @@ hiddenimports = (
         "watchfiles",
         "h11",
         "click",
-        "rich",
         "paramiko",
         "cryptography",
         "bcrypt",
@@ -47,18 +49,23 @@ hiddenimports = (
     ]
 )
 
-# uvloop is Linux/macOS only; pull its data/submodules opportunistically.
 try:
     hiddenimports += collect_submodules("uvloop")
 except Exception:
     pass
 
-# Cryptography ships data files for OpenSSL backends.
 datas += collect_data_files("cryptography")
 
+excludes = [
+    "tkinter",
+    "matplotlib",
+    "PyQt5", "PyQt6", "PySide2", "PySide6",
+    "IPython", "notebook",
+]
 
-a = Analysis(
-    [str(ROOT / "desktop" / "launcher.py")],
+
+gui_analysis = Analysis(
+    [str(ROOT / "desktop" / "launcher_gui.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,
@@ -66,24 +73,36 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        "tkinter",
-        "matplotlib",
-        "PyQt5",
-        "PyQt6",
-        "PySide2",
-        "PySide6",
-        "IPython",
-        "notebook",
-    ],
+    excludes=excludes,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure)
+cli_analysis = Analysis(
+    [str(ROOT / "desktop" / "launcher_cli.py")],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    noarchive=False,
+)
 
-exe = EXE(
-    pyz,
-    a.scripts,
+# MERGE dedupes shared modules/data between the two analyses so the onedir
+# bundle only contains one copy of Python, uvicorn, paramiko, etc.
+MERGE(
+    (gui_analysis, "launcher_gui", "CatStack"),
+    (cli_analysis, "launcher_cli", "CatStackCLI"),
+)
+
+gui_pyz = PYZ(gui_analysis.pure)
+cli_pyz = PYZ(cli_analysis.pure)
+
+gui_exe = EXE(
+    gui_pyz,
+    gui_analysis.scripts,
     [],
     exclude_binaries=True,
     name="CatStack",
@@ -91,7 +110,24 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,           # stdout/stderr visible; same binary doubles as the CLI
+    console=False,          # no black console window on double-click
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+cli_exe = EXE(
+    cli_pyz,
+    cli_analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="CatStackCLI",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,           # CLI needs a console to print
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
@@ -99,9 +135,12 @@ exe = EXE(
 )
 
 coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
+    gui_exe,
+    gui_analysis.binaries,
+    gui_analysis.datas,
+    cli_exe,
+    cli_analysis.binaries,
+    cli_analysis.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

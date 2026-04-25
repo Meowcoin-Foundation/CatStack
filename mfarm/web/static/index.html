@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MeowFarm Dashboard</title>
+<title>CatStack Dashboard</title>
 <style>
 :root {
   --bg: #0d1117;
@@ -52,6 +52,14 @@ header {
 }
 
 .logo span { color: var(--text-dim); font-weight: 400; }
+.logo .version {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+  letter-spacing: 0;
+  margin-left: 8px;
+  opacity: 0.6;
+}
 
 .header-stats {
   display: flex;
@@ -377,7 +385,8 @@ main { padding: 20px 24px; }
 <header>
   <div class="logo">
     <span class="status-dot live"></span>
-    MEOWFARM <span>Dashboard</span>
+    CATSTACK <span>Dashboard</span>
+    <span class="version" id="app-version" title="CatStack version"></span>
   </div>
   <div class="header-stats">
     <div class="header-stat">
@@ -566,11 +575,12 @@ function renderDashboard(rigs) {
     if (r.online && r.stats) {
       online++;
       const m = r.stats.miner || {};
+      const cm = r.stats.cpu_miner || {};
       totalHr += m.hashrate || 0;
-      totalAcc += m.accepted || 0;
+      totalAcc += (m.accepted || 0) + (cm.accepted || 0);
       (r.stats.gpus || []).forEach(g => totalGpuPwr += g.power_draw || 0);
       totalCpuPwr += (r.stats.cpu || {}).power_draw || 0;
-      totalCpuHr += (r.stats.cpu_miner || {}).hashrate || 0;
+      totalCpuHr += cm.hashrate || 0;
     }
   });
 
@@ -587,20 +597,30 @@ function renderDashboard(rigs) {
 function rigCard(r) {
   const s = r.stats || {};
   const m = s.miner || {};
+  const cm = s.cpu_miner || {};
   const gpus = s.gpus || [];
-  const online = r.online && s.miner;
-  const mining = online && m.running;
+  // A rig is "mining" if either slot has a running miner. CPU-only rigs
+  // like mini-02 have m empty but cm running with 20 kH/s RandomX.
+  const gpuRunning = !!m.running;
+  const cpuRunning = !!cm.running;
+  const online = r.online && !!s.miner;
+  const mining = online && (gpuRunning || cpuRunning);
   const maxTemp = Math.max(...gpus.map(g => g.temp || 0), 0);
 
   let status, statusClass;
   if (!r.online) { status = 'OFFLINE'; statusClass = 'offline'; }
-  else if (!m.running) { status = 'IDLE'; statusClass = 'idle'; }
+  else if (!mining) { status = 'IDLE'; statusClass = 'idle'; }
   else if (maxTemp >= 80) { status = 'HOT'; statusClass = 'hot'; }
   else { status = 'MINING'; statusClass = 'online'; }
 
-  const hr = mining ? fmtHash(m.hashrate || 0) : '-';
-  const algo = m.algo || '-';
-  const pwr = gpus.reduce((s, g) => s + (g.power_draw || 0), 0);
+  // Hashrate + algo: prefer GPU miner; fall back to CPU when GPU is idle.
+  const activeMiner = gpuRunning ? m : (cpuRunning ? cm : m);
+  const hr = mining ? fmtHash(activeMiner.hashrate || 0) : '-';
+  const algo = activeMiner.algo || m.algo || cm.algo || '-';
+  // Power: GPU from nvidia-smi; CPU from its own stats block if present.
+  const gpuPwr = gpus.reduce((s, g) => s + (g.power_draw || 0), 0);
+  const cpuPwr = (s.cpu || {}).power_draw || 0;
+  const pwr = gpuPwr + cpuPwr;
   const uptime = s.uptime_secs ? fmtUptime(s.uptime_secs) : '-';
 
   const temps = gpus.map(g => {
@@ -610,8 +630,9 @@ function rigCard(r) {
     return `<span class="gpu-temp ${cls}">${t}C</span>`;
   }).join('');
 
-  const acc = m.accepted || 0;
-  const rej = m.rejected || 0;
+  // Shares: sum across GPU + CPU miners (so CPU-only rigs show XMRig shares).
+  const acc = (m.accepted || 0) + (cm.accepted || 0);
+  const rej = (m.rejected || 0) + (cm.rejected || 0);
 
   return `
     <div class="rig-card ${r.online ? '' : 'offline'}" onclick="openRig('${r.name}')">
@@ -676,6 +697,38 @@ async function openRig(name) {
     <div class="card-row"><span class="label">RAM</span><span class="value">${sys.mem_used_mb && sys.mem_total_mb ? `${sys.mem_used_mb}/${sys.mem_total_mb} MB` : '-'}</span></div>
   </div>`;
 
+  // External chassis fans (Octominer only)
+  const chassis = sys.chassis || {};
+  if (chassis.is_octominer) {
+    const fans = Array.isArray(chassis.external_fans) ? chassis.external_fans : [];
+    html += `<div class="detail-section">
+      <h3>External Chassis Fans <span style="font-size:12px;color:var(--text-muted);font-weight:normal;margin-left:8px">${chassis.product || 'Octominer'}</span></h3>
+      <p style="color:var(--text-muted);font-size:12px;margin:-4px 0 12px 0">
+        Octominer chassis fans. Setting persists until reboot.
+      </p>`;
+    if (!fans.length) {
+      html += `<div style="padding:12px;background:var(--bg3);border:1px dashed var(--border);border-radius:6px;color:var(--text-muted);font-size:13px">
+        Chassis detected (${chassis.vendor} ${chassis.product}), but no PWM controls found via standard hwmon. The X12ULTRA exposes fans through an I2C MCU rather than a Super-I/O chip — install <code>i2c-tools</code> on the rig and the agent will need an X12ULTRA-specific driver to control them.
+      </div>
+    </div>`;
+    } else {
+      html += `<div style="display:flex;flex-wrap:wrap;gap:12px">
+        ${fans.map(f => `
+          <div style="flex:1;min-width:180px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Fan ${f.index + 1}${f.rpm != null ? ' · ' + f.rpm + ' RPM' : ''}</div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <input type="number" id="extfan-${f.index}" min="0" max="100" value="${f.pwm_pct ?? ''}" placeholder="0-100"
+                style="flex:1;padding:6px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:monospace">
+              <span style="color:var(--text-dim);font-size:13px">%</span>
+              <button class="btn" style="padding:6px 10px;font-size:12px" onclick="setExternalFan('${name}',${f.index})">Set</button>
+            </div>
+          </div>`).join('')}
+      </div>
+      <div id="extfan-result" style="margin-top:8px;font-size:13px"></div>
+    </div>`;
+    }
+  }
+
   // GPU table
   if (gpus.length) {
     html += `<div class="detail-section">
@@ -719,6 +772,37 @@ async function openRig(name) {
     <div class="card-row"><span class="label">Restarts</span><span class="value">${m.restarts || 0}</span></div>
   </div>`;
 
+  // ── GPU Overclock (inline, HiveOS-style) ──
+  // Six direct-input fields. Empty = leave that setting alone / clear it.
+  // Values are loaded async in populateOcCard() right after the modal opens.
+  const ocInput = (id, label, unit, placeholder) => `
+    <div style="flex:1;min-width:150px">
+      <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em">${label} <span style="color:var(--text-dim);text-transform:none">${unit}</span></label>
+      <input type="number" id="oc-${id}" placeholder="${placeholder || ''}"
+        style="width:100%;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;font-family:monospace">
+    </div>`;
+  html += `<div class="detail-section">
+    <h3>GPU Overclock <span id="oc-profile-tag" style="font-size:12px;color:var(--text-muted);font-weight:normal;margin-left:8px"></span></h3>
+    <p style="color:var(--text-muted);font-size:12px;margin:-4px 0 12px 0">
+      Leave a box empty to skip that setting. Applies immediately and persists across reboots.
+    </p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+      ${ocInput('core-offset', 'Core Offset',  'MHz', 'e.g. +150')}
+      ${ocInput('core-lock',   'Core Clock Lock', 'MHz', 'e.g. 1400')}
+      ${ocInput('mem-offset',  'Memory Offset', 'MHz', 'e.g. +1000')}
+      ${ocInput('mem-lock',    'Memory Clock Lock', 'MHz', 'e.g. 9500')}
+      ${ocInput('power-limit', 'Power Limit', 'W',   'e.g. 220')}
+      ${ocInput('fan-speed',   'Fan Speed',   '%',   'e.g. 70')}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn success" onclick="applyInlineOc('${name}')">Apply</button>
+      <button class="btn" onclick="clearOcInputs()">Clear Fields</button>
+      <button class="btn danger" onclick="resetOc('${name}')">Reset GPU to Stock</button>
+      <button class="btn" onclick="saveOcAsProfile('${name}')" style="margin-left:auto">Save as Profile</button>
+    </div>
+    <div id="oc-result" style="margin-top:10px;font-size:13px"></div>
+  </div>`;
+
   // Actions
   html += `<div class="detail-section">
     <h3>Actions</h3>
@@ -730,6 +814,7 @@ async function openRig(name) {
       <button class="btn" onclick="viewMinerLog('${name}','gpu')">GPU Miner Log</button>
       <button class="btn" onclick="viewMinerLog('${name}','cpu')">CPU Miner Log</button>
       <button class="btn" onclick="updateMiners('${name}')">Update Miners</button>
+      <button class="btn" onclick="pushSshKey('${name}')">Push SSH Key</button>
       <button class="btn" onclick="renameRig('${name}')">Rename</button>
       <button class="btn danger" onclick="deleteRig('${name}')">Remove Rig</button>
     </div>
@@ -739,11 +824,164 @@ async function openRig(name) {
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal').classList.add('active');
 
-  // Load hashrate history chart
+  // Load hashrate history chart + current OC values
   loadHashrateChart(name);
+  populateOcCard(name);
+}
+
+// ── Inline OC card handlers ──
+
+async function populateOcCard(rigName) {
+  try {
+    const res = await fetch(`/api/rigs/${rigName}/oc`);
+    if (!res.ok) return;
+    const oc = await res.json();
+    const setIf = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.value = (v == null ? '' : v);
+    };
+    setIf('oc-core-offset', oc.core_offset);
+    setIf('oc-mem-offset',  oc.mem_offset);
+    setIf('oc-core-lock',   oc.core_lock);
+    setIf('oc-mem-lock',    oc.mem_lock);
+    setIf('oc-power-limit', oc.power_limit);
+    setIf('oc-fan-speed',   oc.fan_speed);
+    const tag = document.getElementById('oc-profile-tag');
+    if (tag) {
+      if (oc.profile_name) {
+        tag.textContent = `bound to profile: ${oc.profile_name}`;
+      } else if (oc.is_inline) {
+        tag.textContent = 'inline settings';
+      } else {
+        tag.textContent = 'no OC applied';
+      }
+    }
+  } catch(e) { /* first-time rig, fields just stay empty */ }
+}
+
+function readOcInputs() {
+  const n = id => {
+    const v = (document.getElementById(id) || {}).value;
+    if (v == null || v === '') return null;
+    const num = parseInt(v, 10);
+    return Number.isFinite(num) ? num : null;
+  };
+  return {
+    core_offset: n('oc-core-offset'),
+    mem_offset:  n('oc-mem-offset'),
+    core_lock:   n('oc-core-lock'),
+    mem_lock:    n('oc-mem-lock'),
+    power_limit: n('oc-power-limit'),
+    fan_speed:   n('oc-fan-speed'),
+  };
+}
+
+function clearOcInputs() {
+  ['oc-core-offset','oc-mem-offset','oc-core-lock','oc-mem-lock','oc-power-limit','oc-fan-speed']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const r = document.getElementById('oc-result');
+  if (r) r.innerHTML = '<span style="color:var(--text-muted)">Fields cleared. Click Apply to push empty (skip all).</span>';
+}
+
+async function applyInlineOc(rigName) {
+  const body = readOcInputs();
+  const result = document.getElementById('oc-result');
+  if (result) result.innerHTML = '<span style="color:var(--text-muted)">Applying...</span>';
+  try {
+    const res = await fetch(`/api/rigs/${rigName}/oc`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (result) result.innerHTML = `<span style="color:var(--green)">✓ ${data.status || 'applied'}</span>`;
+      if (typeof toast === 'function') toast(`OC applied to ${rigName}`);
+    } else {
+      if (result) result.innerHTML = `<span style="color:var(--red)">${data.detail || JSON.stringify(data)}</span>`;
+    }
+  } catch(e) {
+    if (result) result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+}
+
+async function resetOc(rigName) {
+  if (!confirm(`Reset all GPU OC on "${rigName}" to stock?\n\nThis unlocks clocks, resets power limit to default, and removes the persistent boot script.`)) return;
+  const result = document.getElementById('oc-result');
+  if (result) result.innerHTML = '<span style="color:var(--text-muted)">Resetting...</span>';
+  try {
+    const res = await fetch(`/api/rigs/${rigName}/oc/reset`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      if (result) result.innerHTML = `<span style="color:var(--green)">✓ ${data.status}</span>`;
+      clearOcInputs();
+      const tag = document.getElementById('oc-profile-tag');
+      if (tag) tag.textContent = 'no OC applied';
+    } else {
+      if (result) result.innerHTML = `<span style="color:var(--red)">${data.detail || JSON.stringify(data)}</span>`;
+    }
+  } catch(e) {
+    if (result) result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+}
+
+async function saveOcAsProfile(rigName) {
+  const name = prompt(`Save current OC values as a named profile.\nProfile name:`);
+  if (!name || !name.trim()) return;
+  const body = { name: name.trim(), ...readOcInputs() };
+  try {
+    const res = await fetch('/api/oc-profiles', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    const result = document.getElementById('oc-result');
+    if (res.ok) {
+      if (result) result.innerHTML = `<span style="color:var(--green)">✓ Saved as profile "${name}"</span>`;
+    } else {
+      if (result) result.innerHTML = `<span style="color:var(--red)">${data.detail || JSON.stringify(data)}</span>`;
+    }
+  } catch(e) {
+    const result = document.getElementById('oc-result');
+    if (result) result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
 }
 
 let _hrChart = null;
+
+// Palette for per-algo series. Picked to be distinguishable on dark bg.
+const ALGO_COLORS = [
+  '#00d4aa', // teal (primary / most common)
+  '#f472b6', // pink
+  '#60a5fa', // blue
+  '#c084fc', // purple
+  '#fbbf24', // amber
+  '#34d399', // emerald
+];
+function colorForAlgo(algoList, algo) {
+  const idx = algoList.indexOf(algo);
+  return ALGO_COLORS[idx % ALGO_COLORS.length];
+}
+
+// Algo hashrates have wildly different magnitudes (Equihash ~500 Sol/s vs
+// RandomX ~20,000 H/s vs KawPow ~30,000,000 H/s). Show a sensible unit per
+// algo so the legend + tooltips aren't misleading. If we don't recognise the
+// algo we fall through to a generic H/s label.
+function unitForAlgo(algo) {
+  const a = (algo || '').toLowerCase();
+  if (a.includes('equihash')) return 'Sol/s';
+  if (a.includes('randomx') || a.startsWith('rx/') ||
+      a.startsWith('cn') || a.includes('ghostrider')) return 'H/s';
+  if (a.includes('kawpow') || a.includes('ethash') || a.includes('autolykos') ||
+      a.includes('octopus') || a.includes('blake3')) return 'MH/s';
+  return 'H/s';
+}
+function scaleForAlgo(algo) {
+  // Scale factor to convert raw H/s into the display unit above.
+  return unitForAlgo(algo) === 'MH/s' ? 1e-6 : 1;
+}
+
 async function loadHashrateChart(rigName) {
   const canvas = document.getElementById('hr-chart');
   if (!canvas) return;
@@ -755,29 +993,87 @@ async function loadHashrateChart(rigName) {
       canvas.parentElement.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px 0">No history yet. Data accumulates every 60 seconds.</p>';
       return;
     }
+
     const labels = data.map(d => {
       const dt = new Date(d.t + 'Z');
       return dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     });
-    const hrData = data.map(d => d.hr);
     const pwData = data.map(d => d.power);
+
+    // Build one hashrate series per distinct algo. Each sample only appears
+    // in its own algo's series (other algos get null at that index), so
+    // switching algos produces a real visible gap instead of a spurious
+    // jump from 500 Sol/s to 20k H/s on one continuous line.
+    const algos = [];
+    for (const d of data) {
+      const a = d.algo || 'unknown';
+      if (!algos.includes(a)) algos.push(a);
+    }
+    const hashrateDatasets = algos.map(algo => {
+      const color = colorForAlgo(algos, algo);
+      const unit = unitForAlgo(algo);
+      const scale = scaleForAlgo(algo);
+      const series = data.map(d => {
+        if ((d.algo || 'unknown') !== algo) return null;
+        return (d.hr || 0) * scale;
+      });
+      return {
+        label: `${algo} (${unit})`,
+        data: series,
+        borderColor: color,
+        backgroundColor: color + '22', // ~13% alpha
+        fill: algos.length === 1,      // only fill if one algo (cleaner visual)
+        tension: 0.3, pointRadius: 0, borderWidth: 2,
+        yAxisID: 'y',
+        spanGaps: false,               // draw a gap when algo is not active
+      };
+    });
+
+    const datasets = [
+      ...hashrateDatasets,
+      { label: 'Power (W)', data: pwData, borderColor: '#f59e0b',
+        backgroundColor: 'transparent', fill: false, tension: 0.3,
+        pointRadius: 0, borderWidth: 1.5, yAxisID: 'y1' },
+    ];
+
+    // Decide the left-axis title. If every sample is the same algo we can
+    // use that algo's natural unit; otherwise we show the dominant algo's
+    // unit and rely on the legend to disambiguate.
+    const dominant = algos[0] || '';
+    const unitLabel = unitForAlgo(dominant);
+
     _hrChart = new Chart(canvas, {
       type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Hashrate (Sol/s)', data: hrData, borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2, yAxisID: 'y' },
-          { label: 'Power (W)', data: pwData, borderColor: '#f59e0b', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 1.5, yAxisID: 'y1' },
-        ],
-      },
+      data: { labels, datasets },
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
         interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { labels: { color: '#aaa', boxWidth: 12, font: { size: 11 } } } },
+        plugins: {
+          legend: { labels: { color: '#aaa', boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              // Show the unit next to the value so mixed-algo tooltips are readable.
+              label: (ctx) => {
+                const v = ctx.parsed.y;
+                if (v == null) return null;
+                return `${ctx.dataset.label}: ${v.toFixed(2)}`;
+              },
+            },
+          },
+        },
         scales: {
-          x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
-          y: { position: 'left', ticks: { color: '#00d4aa', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' }, title: { display: true, text: 'Sol/s', color: '#00d4aa', font: { size: 10 } } },
-          y1: { position: 'right', ticks: { color: '#f59e0b', font: { size: 10 } }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Watts', color: '#f59e0b', font: { size: 10 } } },
+          x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 10 } },
+               grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { position: 'left',
+               ticks: { color: '#00d4aa', font: { size: 10 } },
+               grid: { color: 'rgba(255,255,255,0.05)' },
+               title: { display: true, text: `Hashrate (${unitLabel})`,
+                        color: '#00d4aa', font: { size: 10 } } },
+          y1: { position: 'right',
+                ticks: { color: '#f59e0b', font: { size: 10 } },
+                grid: { drawOnChartArea: false },
+                title: { display: true, text: 'Watts',
+                         color: '#f59e0b', font: { size: 10 } } },
         },
       },
     });
@@ -789,6 +1085,37 @@ async function loadHashrateChart(rigName) {
 function closeModal() {
   if (_hrChart) { _hrChart.destroy(); _hrChart = null; }
   document.getElementById('modal').classList.remove('active');
+}
+
+async function setExternalFan(name, index) {
+  const input = document.getElementById(`extfan-${index}`);
+  const result = document.getElementById('extfan-result');
+  const pct = parseInt(input.value);
+  if (isNaN(pct) || pct < 0 || pct > 100) {
+    result.textContent = 'Enter 0-100';
+    result.style.color = 'var(--red)';
+    return;
+  }
+  result.textContent = 'Sending...';
+  result.style.color = 'var(--text-muted)';
+  try {
+    const res = await fetch(`/api/rigs/${name}/external-fan`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({index, pct}),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      result.textContent = `Fan ${index + 1} → ${pct}% sent`;
+      result.style.color = 'var(--green)';
+    } else {
+      result.textContent = 'Error: ' + (data.detail || res.statusText);
+      result.style.color = 'var(--red)';
+    }
+  } catch (e) {
+    result.textContent = 'Error: ' + e.message;
+    result.style.color = 'var(--red)';
+  }
 }
 
 async function rigAction(name, action) {
@@ -947,6 +1274,21 @@ async function minerCmd(name, type, command) {
   }
 }
 
+async function pushSshKey(name) {
+  if (!confirm(`Push CatStack's SSH key to "${name}" using default password?\n\nUse this when a rig is freshly flashed with MeowOS and SSH key auth is failing.`)) return;
+  try {
+    const r = await fetch(`/api/rigs/${name}/push-key`, { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      alert('SSH key pushed: ' + (d.message || 'OK'));
+    } else {
+      alert('Failed: ' + (d.detail || JSON.stringify(d)));
+    }
+  } catch (e) {
+    alert('Error: ' + e);
+  }
+}
+
 async function updateMiners(name) {
   if (!confirm(`Update all miner binaries on "${name}"? This may take a few minutes.`)) return;
   try {
@@ -973,7 +1315,7 @@ async function renameRig(name) {
 }
 
 async function deleteRig(name) {
-  if (!confirm(`Remove rig "${name}" from MeowFarm?`)) return;
+  if (!confirm(`Remove rig "${name}" from CatStack?`)) return;
   try {
     await fetch(`/api/rigs/${name}`, { method: 'DELETE' });
     closeModal();
@@ -1044,18 +1386,41 @@ async function loadFlightSheets() {
     return;
   }
 
+  // Shorten a long wallet: first 6 + last 4 with monospace + full as tooltip
+  const shortWallet = w => {
+    if (!w) return '';
+    if (w.length <= 14) return w;
+    return `${w.slice(0, 6)}…${w.slice(-4)}`;
+  };
+
   div.innerHTML = `<table class="data-table">
-    <tr><th>Name</th><th>Coin</th><th>Algo</th><th>Miner</th><th>Pool</th><th>Solo</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Coin</th><th>Algo</th><th>Miner</th><th>Pool</th><th>Wallet</th><th>Solo</th><th>Actions</th></tr>
     ${sheets.map(fs => `<tr>
       <td style="color:var(--cyan);font-weight:600">${fs.name}</td>
       <td style="color:var(--yellow)">${fs.coin}</td>
       <td>${fs.algo}</td>
       <td style="color:var(--green)">${fs.miner}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fs.pool_url}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fs.pool_url}</td>
+      <td style="font-family:monospace;font-size:12px;color:var(--text-muted)" title="${fs.wallet || ''}\nClick to copy" onclick="navigator.clipboard.writeText('${fs.wallet || ''}').then(()=>toast('Wallet copied'))" role="button">${shortWallet(fs.wallet)}</td>
       <td>${fs.is_solo ? 'Yes' : ''}</td>
       <td style="display:flex;gap:6px"><button class="btn" onclick="applyFS('${fs.name}')">Apply</button><button class="btn danger" onclick="deleteFS('${fs.name}')">Delete</button></td>
     </tr>`).join('')}
   </table>`;
+}
+
+// Lightweight toast (no deps) – shown for 1.5s
+function toast(msg) {
+  let t = document.getElementById('_toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = '_toast';
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--bg3);color:var(--text);padding:10px 18px;border:1px solid var(--border);border-radius:6px;z-index:9999;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.4)';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.display = 'none'; }, 1500);
 }
 
 async function applyFS(fsName) {
@@ -1337,31 +1702,75 @@ setInterval(async () => {
 
 // ── Target picker (dropdown instead of prompt) ──
 
+// Multi-select rig picker. Resolves to a string: either "all" (if every rig
+// is selected) or a comma-separated list like "rig-02,rig-06". Returns null
+// on cancel. Backend's resolve_targets understands both.
 function pickTarget(title) {
   return new Promise(resolve => {
-    const rigs = Object.keys(rigData);
+    const rigs = Object.keys(rigData).sort();
+    if (rigs.length === 0) {
+      alert('No rigs configured yet. Add a rig first.');
+      resolve(null);
+      return;
+    }
+
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:300;display:flex;justify-content:center;align-items:center';
     const box = document.createElement('div');
-    box.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;min-width:320px';
-    box.innerHTML = `<h3 style="margin-bottom:16px;font-size:15px">${title}</h3>
-      <select id="pick-target" style="width:100%;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;margin-bottom:16px">
-        <option value="all">All Rigs</option>
-        ${rigs.map(n => `<option value="${n}">${n} (${rigData[n].host})</option>`).join('')}
-      </select>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
+    box.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;min-width:380px;max-width:480px;max-height:80vh;display:flex;flex-direction:column';
+
+    const rigRow = (n) => {
+      const d = rigData[n] || {};
+      const host = d.host ? ` (${d.host})` : '';
+      const fs = d.flight_sheet ? `<span style="color:var(--text-muted);font-size:11px;margin-left:8px">fs=${d.flight_sheet}</span>` : '';
+      return `<label style="display:flex;align-items:center;padding:8px 4px;border-radius:4px;cursor:pointer" onmouseenter="this.style.background='var(--bg3)'" onmouseleave="this.style.background=''">
+        <input type="checkbox" class="pick-rig" value="${n}" style="margin-right:10px;width:16px;height:16px;cursor:pointer">
+        <span style="flex:1"><span style="font-weight:600">${n}</span><span style="color:var(--text-muted);font-size:12px">${host}</span>${fs}</span>
+      </label>`;
+    };
+
+    box.innerHTML = `
+      <h3 style="margin-bottom:12px;font-size:15px">${title}</h3>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn" id="pick-all" style="flex:1;font-size:12px;padding:6px 10px">Select All</button>
+        <button class="btn" id="pick-none" style="flex:1;font-size:12px;padding:6px 10px">Clear</button>
+        <button class="btn" id="pick-invert" style="flex:1;font-size:12px;padding:6px 10px">Invert</button>
+      </div>
+      <div id="pick-list" style="overflow-y:auto;flex:1;border:1px solid var(--border);border-radius:6px;padding:4px;margin-bottom:14px;max-height:50vh">
+        ${rigs.map(rigRow).join('')}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+        <span id="pick-count" style="margin-right:auto;color:var(--text-muted);font-size:13px">0 of ${rigs.length} selected</span>
         <button class="btn" id="pick-cancel">Cancel</button>
-        <button class="btn success" id="pick-ok">Apply</button>
+        <button class="btn success" id="pick-ok" disabled>Apply</button>
       </div>`;
+
     overlay.appendChild(box);
     document.body.appendChild(overlay);
-    overlay.addEventListener('click', e => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(null); }});
-    box.querySelector('#pick-cancel').onclick = () => { document.body.removeChild(overlay); resolve(null); };
-    box.querySelector('#pick-ok').onclick = () => {
-      const val = box.querySelector('#pick-target').value;
-      document.body.removeChild(overlay);
-      resolve(val);
+
+    const boxes = () => Array.from(box.querySelectorAll('.pick-rig'));
+    const updateCount = () => {
+      const checked = boxes().filter(b => b.checked).length;
+      box.querySelector('#pick-count').textContent =
+        `${checked} of ${rigs.length} selected`;
+      box.querySelector('#pick-ok').disabled = (checked === 0);
     };
+    boxes().forEach(b => b.addEventListener('change', updateCount));
+    box.querySelector('#pick-all').onclick = () => { boxes().forEach(b => b.checked = true); updateCount(); };
+    box.querySelector('#pick-none').onclick = () => { boxes().forEach(b => b.checked = false); updateCount(); };
+    box.querySelector('#pick-invert').onclick = () => { boxes().forEach(b => b.checked = !b.checked); updateCount(); };
+
+    const close = (val) => { document.body.removeChild(overlay); resolve(val); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
+    box.querySelector('#pick-cancel').onclick = () => close(null);
+    box.querySelector('#pick-ok').onclick = () => {
+      const selected = boxes().filter(b => b.checked).map(b => b.value);
+      if (selected.length === 0) return;
+      // Optimisation: "all" keeps old semantics and is simpler to read in logs
+      const target = (selected.length === rigs.length) ? 'all' : selected.join(',');
+      close(target);
+    };
+    updateCount();
   });
 }
 
@@ -1376,6 +1785,16 @@ document.addEventListener('keydown', e => {
 });
 
 // Start
+async function loadVersion() {
+  try {
+    const res = await fetch('/api/version');
+    const data = await res.json();
+    document.getElementById('app-version').textContent = 'v' + data.version;
+  } catch (e) {
+    // non-fatal
+  }
+}
+loadVersion();
 connect();
 </script>
 </body>

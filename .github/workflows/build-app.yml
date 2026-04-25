@@ -65,19 +65,23 @@ jobs:
           CatStack - Mining Farm Management System
           ========================================
 
-          Run the dashboard:
-            Windows:  double-click CatStack.exe
-            Linux:    ./CatStack
+          Two executables share one bundle:
 
-          The dashboard opens at http://localhost:8888
-          (override the port with the CATSTACK_PORT env var)
+            CatStack.exe      Double-click to open the dashboard in its own
+                              native-looking window (no browser chrome).
+                              Requires Microsoft Edge or Google Chrome to
+                              be installed (Edge ships with every Windows
+                              10/11). On Linux: Chromium, Google Chrome,
+                              or Microsoft Edge.
 
-          Use as CLI (same binary, pass args):
-            CatStack rig list
-            CatStack status
-            CatStack --help
+            CatStackCLI.exe   Console entry point for scripting:
+                              CatStackCLI rig list
+                              CatStackCLI status
+                              CatStackCLI --help
 
-          Data lives in ~/.mfarm/ (override with MFARM_HOME env var).
+          Configuration:
+            CATSTACK_PORT   Dashboard port (default 8888)
+            MFARM_HOME      Data/config directory (default ~/.mfarm)
           EOF
 
       - name: Package (Windows)
@@ -96,17 +100,21 @@ jobs:
           tar -C dist -czf "$name" CatStack
           echo "ASSET=$name" >> "$GITHUB_ENV"
 
-      - name: Smoke-test the binary
+      - name: Smoke-test the CLI binary
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            BIN=./dist/CatStack/CatStack.exe
+            CLI=./dist/CatStack/CatStackCLI.exe
+            GUI=./dist/CatStack/CatStack.exe
           else
-            BIN=./dist/CatStack/CatStack
+            CLI=./dist/CatStack/CatStackCLI
+            GUI=./dist/CatStack/CatStack
           fi
-          "$BIN" --version
-          "$BIN" --help
-          "$BIN" rig list
+          "$CLI" --version
+          "$CLI" --help
+          "$CLI" rig list
+          # GUI exe would try to open a browser window - just confirm it built.
+          test -x "$GUI"
 
       - name: Generate checksum
         shell: bash

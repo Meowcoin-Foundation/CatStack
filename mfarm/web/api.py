@@ -672,3 +672,9 @@ async def update_miners(name: str):
         return {"status": "updated", "output": result.get("stdout", "")}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@router.get("/version")
+def get_version():
+    from mfarm import __version__
+    return {"version": __version__}
