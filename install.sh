@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SUPABASE_URL="https://your-project-ref.supabase.co"
+SUPABASE_URL="https://tbxiptvtxvnmtvfgrylj.supabase.co"
 BUCKET="catstack"
-MFARM_REPO="https://github.com/your-org/CatStack"
+MFARM_REPO="https://github.com/Meowcoin-Foundation/CatStack"
 
 RESET="\033[0m"
 BOLD="\033[1m"
