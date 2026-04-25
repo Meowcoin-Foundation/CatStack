@@ -3,6 +3,7 @@ name: Build MeowOS Image
 on:
   push:
     tags: ['v*']
+    branches: [develop]
   workflow_dispatch:
 
 jobs:
@@ -16,6 +17,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set build identity
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            LABEL="v$(cat VERSION | tr -d '\n')"
+            CHANNEL=stable
+            PREFIX=""
+            LATEST="meowos-latest.img.xz"
+          else
+            SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+            LABEL="dev-${SHORT_SHA}"
+            CHANNEL=dev
+            PREFIX="dev/"
+            LATEST="meowos-dev-latest.img.xz"
+          fi
+          echo "LABEL=${LABEL}"       >> $GITHUB_ENV
+          echo "CHANNEL=${CHANNEL}"   >> $GITHUB_ENV
+          echo "PREFIX=${PREFIX}"     >> $GITHUB_ENV
+          echo "LATEST=${LATEST}"     >> $GITHUB_ENV
+
       - name: Install build tools
         run: |
           sudo apt-get update -qq
@@ -27,11 +47,9 @@ jobs:
           MEOWOS_OUTPUT: /tmp/meowos.img
         run: |
           sudo -E bash build-usb/wsl-build-image.sh
-          VERSION=$(cat VERSION | tr -d '\n')
           sudo xz -9 -T0 /tmp/meowos.img
-          sudo mv /tmp/meowos.img.xz meowos-v${VERSION}.img.xz
-          sudo chown $(id -u):$(id -g) meowos-v${VERSION}.img.xz
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          sudo mv /tmp/meowos.img.xz meowos-${LABEL}.img.xz
+          sudo chown $(id -u):$(id -g) meowos-${LABEL}.img.xz
 
       - name: Generate checksums
         run: sha256sum meowos-*.img.xz > SHA256SUMS.txt
@@ -47,47 +65,43 @@ jobs:
             local file="$1"
             local path="$2"
             local content_type="${3:-application/octet-stream}"
-
             curl -fsSL \
               -X PUT \
               -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
               -H "Content-Type: ${content_type}" \
               -H "x-upsert: true" \
               -T "${file}" \
-              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${path}"
+              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${path}"
           }
 
-          # Versioned copy
-          upload "meowos-v${VERSION}.img.xz" "meowos-v${VERSION}.img.xz"
+          FILENAME="meowos-${LABEL}.img.xz"
 
-          # Latest (always overwritten)
-          upload "meowos-v${VERSION}.img.xz" "meowos-latest.img.xz"
-
-          # Checksums
+          upload "${FILENAME}" "${FILENAME}"
+          upload "${FILENAME}" "${LATEST}"
           upload "SHA256SUMS.txt" "SHA256SUMS.txt" "text/plain"
 
-          # Install script
-          upload "install.sh" "install.sh" "text/plain"
+          # install.sh only changes on stable releases
+          if [[ "${CHANNEL}" == "stable" ]]; then
+            upload "install.sh" "install.sh" "text/plain"
+          fi
 
-          # Manifest
           SHA256=$(cut -d' ' -f1 SHA256SUMS.txt)
-          printf '{\n  "version": "%s",\n  "filename": "meowos-v%s.img.xz",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
-            "${VERSION}" "${VERSION}" "${SHA256}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-v${VERSION}.img.xz" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-latest.img.xz" \
+          printf '{\n  "channel": "%s",\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
+            "${CHANNEL}" "${LABEL}" "${FILENAME}" "${SHA256}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${FILENAME}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${LATEST}" \
             > manifest-meowos.json
           upload "manifest-meowos.json" "manifest-meowos.json" "application/json"
 
-          echo "Published:"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/meowos-latest.img.xz"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/install.sh"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/manifest-meowos.json"
+          echo "Published (${CHANNEL}):"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}${LATEST}"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${PREFIX}manifest-meowos.json"
 
-      - name: Upload artifact (non-tag builds)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+      - name: Upload artifact
+        if: env.CHANNEL == 'dev'
         uses: actions/upload-artifact@v4
         with:
-          name: meowos-image
+          name: meowos-image-${{ env.LABEL }}
           path: |
             meowos-*.img.xz
             SHA256SUMS.txt

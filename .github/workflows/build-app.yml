@@ -3,6 +3,7 @@ name: Build CatStack App
 on:
   push:
     tags: ['v*']
+    branches: [develop]
   workflow_dispatch:
 
 jobs:
@@ -36,10 +37,23 @@ jobs:
           python -m pip install pyinstaller
           python -m pip install -e .
 
-      - name: Read version
+      - name: Set build identity
         id: ver
         shell: bash
-        run: echo "version=$(cat VERSION | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            LABEL="v$(cat VERSION | tr -d '\n\r')"
+            CHANNEL=stable
+            PREFIX=""
+          else
+            SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+            LABEL="dev-${SHORT_SHA}"
+            CHANNEL=dev
+            PREFIX="dev/"
+          fi
+          echo "label=${LABEL}"     >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "prefix=${PREFIX}"   >> "$GITHUB_OUTPUT"
 
       - name: Build with PyInstaller
         run: pyinstaller desktop/CatStack.spec --clean --noconfirm
@@ -70,7 +84,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $name = "CatStack-v${{ steps.ver.outputs.version }}-${{ matrix.asset_suffix }}.zip"
+          $name = "CatStack-${{ steps.ver.outputs.label }}-${{ matrix.asset_suffix }}.zip"
           Compress-Archive -Path dist/CatStack/* -DestinationPath $name
           "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -78,7 +92,7 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: |
-          name="CatStack-v${{ steps.ver.outputs.version }}-${{ matrix.asset_suffix }}.tar.gz"
+          name="CatStack-${{ steps.ver.outputs.label }}-${{ matrix.asset_suffix }}.tar.gz"
           tar -C dist -czf "$name" CatStack
           echo "ASSET=$name" >> "$GITHUB_ENV"
 
@@ -90,8 +104,6 @@ jobs:
           else
             BIN=./dist/CatStack/CatStack
           fi
-          # --version exercises click. --help loads every command group.
-          # rig list exercises rich rendering + sqlite + the full import graph.
           "$BIN" --version
           "$BIN" --help
           "$BIN" rig list
@@ -118,37 +130,39 @@ jobs:
               -H "Content-Type: ${content_type}" \
               -H "x-upsert: true" \
               -T "${file}" \
-              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${path}"
+              "${{ secrets.SUPABASE_URL }}/storage/v1/object/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${path}"
           }
 
           SUFFIX="${{ matrix.asset_suffix }}"
           EXT="${{ matrix.archive_ext }}"
-          LATEST="catstack-latest-${SUFFIX}.${EXT}"
+          CHANNEL="${{ steps.ver.outputs.channel }}"
 
-          # Versioned copy
+          if [[ "${CHANNEL}" == "stable" ]]; then
+            LATEST="catstack-latest-${SUFFIX}.${EXT}"
+          else
+            LATEST="catstack-dev-latest-${SUFFIX}.${EXT}"
+          fi
+
           upload "${ASSET}" "${ASSET}"
-
-          # Latest (always overwritten)
           upload "${ASSET}" "${LATEST}"
 
-          # Manifest
           SHA256=$(cut -d' ' -f1 "${ASSET}.sha256")
-          printf '{\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
-            "${{ steps.ver.outputs.version }}" "${ASSET}" "${SHA256}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${ASSET}" \
-            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${LATEST}" \
+          printf '{\n  "channel": "%s",\n  "version": "%s",\n  "filename": "%s",\n  "sha256": "%s",\n  "url": "%s",\n  "latest_url": "%s"\n}\n' \
+            "${CHANNEL}" "${{ steps.ver.outputs.label }}" "${ASSET}" "${SHA256}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${ASSET}" \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${LATEST}" \
             > "manifest-app-${SUFFIX}.json"
           upload "manifest-app-${SUFFIX}.json" "manifest-app-${SUFFIX}.json" "application/json"
 
-          echo "Published:"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${LATEST}"
-          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/manifest-app-${SUFFIX}.json"
+          echo "Published (${CHANNEL}):"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}${LATEST}"
+          echo "  ${{ secrets.SUPABASE_URL }}/storage/v1/object/public/${{ secrets.SUPABASE_BUCKET }}/${{ steps.ver.outputs.prefix }}manifest-app-${SUFFIX}.json"
 
-      - name: Upload artifact (non-tag builds)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+      - name: Upload artifact
+        if: steps.ver.outputs.channel == 'dev'
         uses: actions/upload-artifact@v4
         with:
-          name: catstack-app-${{ matrix.asset_suffix }}
+          name: catstack-app-${{ steps.ver.outputs.label }}-${{ matrix.asset_suffix }}
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
