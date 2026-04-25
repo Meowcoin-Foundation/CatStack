@@ -1,0 +1,123 @@
+name: Build CatStack App
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_suffix: windows-x64
+            archive_ext: zip
+          - os: ubuntu-22.04
+            asset_suffix: linux-x86_64
+            archive_ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -e .
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(cat VERSION | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+
+      - name: Build with PyInstaller
+        run: pyinstaller desktop/CatStack.spec --clean --noconfirm
+
+      - name: Stage README into bundle
+        shell: bash
+        run: |
+          cat > dist/CatStack/README.txt <<'EOF'
+          CatStack - Mining Farm Management System
+          ========================================
+
+          Run the dashboard:
+            Windows:  double-click CatStack.exe
+            Linux:    ./CatStack
+
+          The dashboard opens at http://localhost:8888
+          (override the port with the CATSTACK_PORT env var)
+
+          Use as CLI (same binary, pass args):
+            CatStack rig list
+            CatStack status
+            CatStack --help
+
+          Data lives in ~/.mfarm/ (override with MFARM_HOME env var).
+          EOF
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $name = "CatStack-v${{ steps.ver.outputs.version }}-${{ matrix.asset_suffix }}.zip"
+          Compress-Archive -Path dist/CatStack/* -DestinationPath $name
+          "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          name="CatStack-v${{ steps.ver.outputs.version }}-${{ matrix.asset_suffix }}.tar.gz"
+          tar -C dist -czf "$name" CatStack
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - name: Smoke-test the binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            BIN=./dist/CatStack/CatStack.exe
+          else
+            BIN=./dist/CatStack/CatStack
+          fi
+          # --version exercises click. --help loads every command group.
+          # rig list exercises rich rendering + sqlite + the full import graph.
+          "$BIN" --version
+          "$BIN" --help
+          "$BIN" rig list
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else
+            powershell -Command "(Get-FileHash -Algorithm SHA256 '$ASSET').Hash.ToLower() + '  ' + '$ASSET'" > "$ASSET.sha256"
+          fi
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+      - name: Upload artifact (non-tag builds)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: catstack-app-${{ matrix.asset_suffix }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
