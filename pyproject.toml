@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mfarm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "MeowFarm - Mining farm management system, HiveOS replacement"
 requires-python = ">=3.10"
 dependencies = [
@@ -24,6 +24,9 @@ dev = [
 
 [project.scripts]
 mfarm = "mfarm.cli:cli"
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
 include = ["mfarm*"]
