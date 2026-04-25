@@ -48,6 +48,7 @@ install_mfarm() {
     fi
 
     info "Installing mfarm..."
+    pip3 install --quiet --upgrade pip
     pip3 install --quiet "git+${MFARM_REPO}.git" \
         || die "Failed to install mfarm. Try: pip3 install git+${MFARM_REPO}.git"
     success "mfarm installed"
@@ -60,6 +61,7 @@ update_mfarm() {
     command -v mfarm &>/dev/null || die "mfarm is not installed. Run the installer first."
 
     info "Updating mfarm..."
+    pip3 install --quiet --upgrade pip
     pip3 install --quiet --upgrade "git+${MFARM_REPO}.git" \
         || die "Update failed. Try: pip3 install --upgrade git+${MFARM_REPO}.git"
     success "mfarm updated to $(mfarm --version 2>/dev/null || echo 'unknown version')"
