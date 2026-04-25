@@ -6,3 +6,7 @@
 *.yaml text eol=lf
 build-usb/** text eol=lf
 mfarm/worker/** text eol=lf
+*.tar.gz binary
+*.tar.xz binary
+*.img binary
+*.img.xz binary
