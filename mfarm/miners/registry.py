@@ -175,6 +175,24 @@ _register(MinerDefinition(
 ))
 
 
+_register(MinerDefinition(
+    name="rigel",
+    display_name="Rigel",
+    binary_name="rigel",
+    supported_algos=[
+        "autolykos2", "ethash", "etchash", "kawpow", "octopus",
+        "alephium", "ironfish", "kaspa", "karlsenhash", "karlsenhashv2",
+        "nexapow", "pyrinhash", "pyrinhashv2",
+        "xelishash", "xelishashv2", "xelishashv3",
+        "sha512_256d_radiant",
+    ],
+    gpu_type="nvidia",
+    api_type="rigel_http",
+    default_api_port=4067,
+    supports_solo=False,
+))
+
+
 def get_miner(name: str) -> MinerDefinition | None:
     return MINERS.get(name.lower())
 
