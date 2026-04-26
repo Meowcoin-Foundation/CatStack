@@ -426,6 +426,17 @@ main { padding: 20px 24px; }
 <main>
   <!-- Dashboard Tab -->
   <div class="tab-content active" id="tab-dashboard">
+    <!-- Bulk actions toolbar — pick rigs once, hit any button. -->
+    <div id="bulk-toolbar" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:16px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px">
+      <span style="color:var(--text-dim);font-size:12px;text-transform:uppercase;letter-spacing:0.05em">Fleet actions</span>
+      <button class="btn" onclick="bulkAction('update-miners','Update Miners')">Update Miners</button>
+      <button class="btn" onclick="bulkAction('restart-miner','Restart Miner')">Restart Miner</button>
+      <button class="btn" onclick="bulkAction('start-miner','Start Miner')">Start Miner</button>
+      <button class="btn" onclick="bulkAction('stop-miner','Stop Miner')">Stop Miner</button>
+      <button class="btn" onclick="bulkAction('reboot','Reboot Rigs')">Reboot</button>
+      <button class="btn danger" onclick="bulkAction('shutdown','Shut Down Rigs')">Shutdown</button>
+      <button class="btn" onclick="bulkExec()">Run Command...</button>
+    </div>
     <div class="rig-grid" id="rig-grid"></div>
     <div class="empty-state" id="no-rigs" style="display:none">
       <div class="icon">&#9881;</div>
@@ -1149,6 +1160,96 @@ async function rigAction(name, action) {
   } catch (e) {
     alert('Error: ' + e.message);
   }
+}
+
+// ── Bulk fleet actions ─────────────────────────────────────────────
+//
+// Reuses the existing pickTarget multi-select modal to choose rigs, then
+// calls /api/bulk/{action}/{target}. Backend dispatches the action to each
+// rig in parallel and returns per-rig results.
+
+const BULK_DESTRUCTIVE = new Set(['reboot', 'shutdown', 'exec']);
+
+async function bulkAction(action, label) {
+  const target = await pickTarget(`${label}: select rigs`);
+  if (!target) return;
+  const targetCount = target === 'all'
+    ? Object.keys(rigData).length
+    : target.split(',').length;
+  if (BULK_DESTRUCTIVE.has(action)) {
+    if (!confirm(`${label} on ${targetCount} rig${targetCount===1?'':'s'}?\n\nTarget: ${target}`)) return;
+  }
+  await runBulk(action, target, label, null);
+}
+
+async function bulkExec() {
+  const command = prompt('Shell command to run on selected rigs:\n(runs as the rig\'s configured SSH user)');
+  if (!command) return;
+  const target = await pickTarget(`Run "${command.length > 40 ? command.slice(0,40)+'…' : command}": select rigs`);
+  if (!target) return;
+  const targetCount = target === 'all'
+    ? Object.keys(rigData).length
+    : target.split(',').length;
+  if (!confirm(`Run command on ${targetCount} rig${targetCount===1?'':'s'}?\n\n${command}`)) return;
+  await runBulk('exec', target, 'Command', command);
+}
+
+async function runBulk(action, target, label, command) {
+  // Show a results overlay so output stays visible while requests complete.
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay active';
+  overlay.id = 'bulk-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:900px">
+      <div class="modal-header">
+        <h2>Bulk: ${label}</h2>
+        <button class="modal-close" onclick="document.getElementById('bulk-overlay').remove()">&times;</button>
+      </div>
+      <div style="padding:12px 16px;color:var(--text-dim);font-size:13px;border-bottom:1px solid var(--border)">
+        Target: <code>${target}</code>${command ? ' · Command: <code>'+escapeHtml(command)+'</code>' : ''}
+      </div>
+      <div id="bulk-results" class="terminal" style="height:auto;max-height:60vh;margin:0;border-radius:0 0 12px 12px;font-size:12px;line-height:1.5;padding:14px;white-space:pre-wrap;word-break:break-all">Running…</div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  try {
+    const url = `/api/bulk/${encodeURIComponent(action)}/${encodeURIComponent(target)}`;
+    const opts = { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command}) };
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    const out = document.getElementById('bulk-results');
+    if (!out) return;
+    if (!res.ok) {
+      out.textContent = `HTTP ${res.status}: ${data.detail || JSON.stringify(data)}`;
+      return;
+    }
+    // Format: per-rig, sorted, with brief status for non-exec and full
+    // stdout/stderr/rc for exec.
+    const lines = [];
+    const results = data.results || {};
+    for (const name of Object.keys(results).sort()) {
+      const r = results[name];
+      if (typeof r === 'string') {
+        lines.push(`${name.padEnd(20)} ${r}`);
+      } else if (r && typeof r === 'object' && 'rc' in r) {
+        lines.push(`╭─ ${name} (rc=${r.rc}) ─`);
+        if (r.stdout) lines.push(r.stdout.replace(/^/gm, '│ '));
+        if (r.stderr) lines.push(r.stderr.replace(/^/gm, '│ [stderr] '));
+        lines.push(`╰─`);
+      } else {
+        lines.push(`${name.padEnd(20)} ${JSON.stringify(r)}`);
+      }
+    }
+    out.textContent = lines.join('\n') || '(no rigs matched)';
+  } catch (e) {
+    const out = document.getElementById('bulk-results');
+    if (out) out.textContent = `Error: ${e.message}`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
 function openSSH(name) {

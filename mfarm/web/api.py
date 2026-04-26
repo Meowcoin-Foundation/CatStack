@@ -1073,6 +1073,132 @@ async def update_miners(name: str):
         return {"status": "error", "error": "; ".join(parts)}
 
 
+# ── Bulk actions ────────────────────────────────────────────────────
+
+# Map of bulk action -> per-rig coroutine factory. Each factory returns a
+# coroutine that runs the action against a single Rig and returns a string
+# (status / error). Adding a new bulk action = adding an entry here.
+def _bulk_actions(rig: Rig, pool, loop, command: str | None) -> dict:
+    """Return the registry of bulk actions valid for `rig`. Each entry's
+    `run` is an async callable taking no args."""
+    async def reboot():
+        try:
+            await loop.run_in_executor(_executor, lambda: pool.exec(rig, "sudo reboot", timeout=5))
+        except Exception:
+            pass  # SSH disconnects on reboot, treat as success
+        return "rebooting"
+
+    async def shutdown():
+        try:
+            await loop.run_in_executor(_executor, lambda: pool.exec(rig, "sudo poweroff", timeout=5))
+        except Exception:
+            pass
+        return "shutting down"
+
+    async def restart_miner():
+        await loop.run_in_executor(
+            _executor,
+            lambda: pool.upload_string(rig, "restart_miner", "/var/run/mfarm/command"),
+        )
+        return "restart sent"
+
+    async def stop_miner():
+        await loop.run_in_executor(
+            _executor,
+            lambda: pool.upload_string(rig, "stop_miner", "/var/run/mfarm/command"),
+        )
+        return "stop sent"
+
+    async def start_miner():
+        await loop.run_in_executor(
+            _executor,
+            lambda: pool.upload_string(rig, "start_miner", "/var/run/mfarm/command"),
+        )
+        return "start sent"
+
+    async def update_miners():
+        # Same pipeline as the single-rig endpoint: push fresh downloader,
+        # repair gzipped blobs, restart agent, then run the downloader.
+        ok, msg = await loop.run_in_executor(
+            _executor, lambda: _push_downloader_and_repair(rig),
+        )
+        if not ok:
+            return f"prep failed: {msg}"
+        try:
+            out, _, rc = await loop.run_in_executor(
+                _executor,
+                lambda: pool.exec(rig, "sudo bash /opt/mfarm/miner-downloader.sh all", timeout=300),
+            )
+            return f"updated (rc={rc}); {msg}"
+        except Exception as e:
+            return f"download failed: {e}; {msg}"
+
+    async def exec_cmd():
+        if not command:
+            return "error: no command provided"
+        try:
+            stdout, stderr, rc = await loop.run_in_executor(
+                _executor, lambda: pool.exec(rig, command, timeout=60),
+            )
+            # Trim long output so the UI summary stays readable. Full output
+            # is still returned in the per-rig result for debugging.
+            return {
+                "rc": rc,
+                "stdout": stdout[-2000:] if len(stdout) > 2000 else stdout,
+                "stderr": stderr[-500:] if len(stderr) > 500 else stderr,
+            }
+        except Exception as e:
+            return f"error: {e}"
+
+    return {
+        "reboot":         {"run": reboot,         "needs_confirm": True},
+        "shutdown":       {"run": shutdown,       "needs_confirm": True},
+        "restart-miner":  {"run": restart_miner,  "needs_confirm": False},
+        "stop-miner":     {"run": stop_miner,     "needs_confirm": False},
+        "start-miner":    {"run": start_miner,    "needs_confirm": False},
+        "update-miners":  {"run": update_miners,  "needs_confirm": False},
+        "exec":           {"run": exec_cmd,       "needs_confirm": True},
+    }
+
+
+@router.post("/bulk/{action}/{target}")
+async def bulk_action(action: str, target: str, body: dict | None = None):
+    """Run an action against a target spec (single rig name, comma-separated
+    list, 'group:NAME', or 'all'). Returns per-rig results.
+
+    Supported actions: reboot, shutdown, restart-miner, stop-miner,
+    start-miner, update-miners, exec.
+
+    For 'exec', POST body must be {"command": "shell command here"}.
+    """
+    from mfarm.targets import resolve_targets
+    db = get_db()
+    try:
+        rigs = resolve_targets(db, target)
+    except Exception as e:
+        # ClickException carries the user-facing message in .message; fall
+        # back to str() for any other exception type.
+        raise HTTPException(400, getattr(e, "message", str(e)))
+
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    command = (body or {}).get("command")
+
+    # Run the action against every rig in parallel — bulk reboot of 13 rigs
+    # serially would take 13 × ssh-connect-timeout if any rig is unreachable.
+    async def _one(rig: Rig) -> tuple[str, object]:
+        actions = _bulk_actions(rig, pool, loop, command)
+        if action not in actions:
+            return rig.name, f"error: unknown action '{action}'"
+        try:
+            return rig.name, await actions[action]["run"]()
+        except Exception as e:
+            return rig.name, f"error: {e}"
+
+    pairs = await asyncio.gather(*(_one(r) for r in rigs))
+    return {"action": action, "results": dict(pairs)}
+
+
 @router.get("/version")
 def get_version():
     from mfarm import __version__
