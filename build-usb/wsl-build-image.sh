@@ -385,7 +385,13 @@ show "Configuring hostname"
 MAC_SUFFIX=$(ip link show | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':' | tail -c 5)
 hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/127.0.1.1.*/127.0.1.1\tmfarm-rig-${MAC_SUFFIX}/" /etc/hosts
-nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration >> "$LOG" 2>&1 || true
+# Second nvidia-xconfig call (the first is inside the lspci-guard above).
+# Guard this one too — it logged "ERROR: Unable to determine number of
+# GPUs in system" on CPU-only rigs and confused users into thinking the
+# install was broken.
+if lspci | grep -qi nvidia; then
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration >> "$LOG" 2>&1 || true
+fi
 
 show "Starting MeowOS services"
 systemctl enable mfarm-agent >> "$LOG" 2>&1

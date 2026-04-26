@@ -349,8 +349,12 @@ MAC_SUFFIX=$(ip link show | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':'
 hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/mfarm-rig/mfarm-rig-${MAC_SUFFIX}/g" /etc/hosts
 
-# Generate xorg.conf with coolbits
-nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+# Generate xorg.conf with coolbits — but only on rigs that actually have
+# NVIDIA hardware. Calling nvidia-xconfig with no GPUs prints "ERROR:
+# Unable to determine number of GPUs in system" on CPU-only rigs.
+if lspci | grep -qi nvidia; then
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+fi
 
 # Collect hardware info
 mkdir -p /var/run/mfarm

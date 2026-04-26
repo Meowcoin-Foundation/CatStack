@@ -233,7 +233,12 @@ sensors-detect --auto >/dev/null 2>&1 || true
 MAC_SUFFIX=$(ip link show | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':' | tail -c 5)
 hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/mfarm-rig/mfarm-rig-${MAC_SUFFIX}/g" /etc/hosts
-nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+# Skip nvidia-xconfig on CPU-only rigs (mini-series etc.) — calling it
+# without GPUs prints a misleading "ERROR: Unable to determine number
+# of GPUs" into the firstboot log.
+if lspci | grep -qi nvidia; then
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+fi
 mkdir -p /var/run/mfarm
 python3 -c "
 import json,subprocess,os,socket

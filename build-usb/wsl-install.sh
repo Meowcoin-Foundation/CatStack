@@ -305,7 +305,12 @@ MAC_SUFFIX=$(ip link show | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':'
 hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/mfarm-rig/mfarm-rig-${MAC_SUFFIX}/g" /etc/hosts
 sed -i "s/%HOSTNAME%/mfarm-rig-${MAC_SUFFIX}/g" /opt/mfarm/miners/xmrig-config.json
-nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+# Only call nvidia-xconfig on rigs with NVIDIA hardware — otherwise it
+# emits a misleading "ERROR: Unable to determine number of GPUs in
+# system" into the firstboot log on CPU-only rigs.
+if lspci | grep -qi nvidia; then
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+fi
 mkdir -p /var/run/mfarm
 python3 -c "
 import json,subprocess,os,socket

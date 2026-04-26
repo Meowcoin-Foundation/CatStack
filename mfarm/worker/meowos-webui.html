@@ -350,9 +350,36 @@ async function pollStatus() {
     <div class="summary-item"><div class="value">${accepted} / ${rejected}</div><div class="label">Accept / Reject</div></div>
   `;
 
-  // GPU grid
+  // GPU grid. On CPU-only rigs (mini-series, etc.) gpus is permanently empty
+  // because there's no NVIDIA hardware — say so plainly instead of forever
+  // claiming "Waiting for miner to start...". When gpus is empty AND the
+  // miner is mining (i.e. it's a CPU miner like XMRig), show a CPU stats
+  // card in place of the GPU grid so the user has *something* useful here.
+  const gpuGrid = document.getElementById('gpu-grid');
   if (gpus.length === 0) {
-    document.getElementById('gpu-grid').innerHTML = '<p style="color:var(--dim)">No GPU data yet. Waiting for miner to start...</p>';
+    const cpu = stats.cpu || {};
+    const cpuMiner = stats.cpu_miner || {};
+    const isCpuMining = !!(cpuMiner.running || (miner.running && /xmrig|cpuminer|randomx|rx\//i.test((miner.name||'') + (miner.algo||''))));
+    if (isCpuMining || (cpu.model || cpu.cores)) {
+      // Friendly CPU-only card. No "no driver" / "waiting for miner" lies.
+      const cpuMinerHash = cpuMiner.hashrate || (isCpuMining ? miner.hashrate || 0 : 0);
+      const cpuPower = cpu.power_draw || 0;
+      const cpuTemp = cpu.temp || 0;
+      gpuGrid.innerHTML = `
+        <div class="gpu-card" style="grid-column:1/-1">
+          <div class="gpu-name">CPU-only rig &mdash; no NVIDIA GPUs installed</div>
+          <div class="gpu-stats">
+            <span class="stat-label">CPU</span><span class="stat-value">${cpu.model || 'unknown'}</span>
+            <span class="stat-label">Cores / Threads</span><span class="stat-value">${cpu.cores || '?'} / ${cpu.threads || '?'}</span>
+            <span class="stat-label">Temp</span><span class="stat-value ${tempClass(cpuTemp)}">${cpuTemp || '-'}&deg;C</span>
+            <span class="stat-label">Power</span><span class="stat-value">${cpuPower.toFixed(0)}W</span>
+            <span class="stat-label">Frequency</span><span class="stat-value">${cpu.freq_mhz || '-'} MHz</span>
+            <span class="stat-label">Hashrate</span><span class="stat-value">${cpuMinerHash ? formatHash(cpuMinerHash) : '-'}</span>
+          </div>
+        </div>`;
+    } else {
+      gpuGrid.innerHTML = '<p style="color:var(--dim)">No GPU detected. If this rig has NVIDIA GPUs, the driver may not be loaded yet — reboot to apply.</p>';
+    }
   } else {
     document.getElementById('gpu-grid').innerHTML = gpus.map((g, i) => `
       <div class="gpu-card">

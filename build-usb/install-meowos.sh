@@ -288,7 +288,13 @@ hostnamectl set-hostname "mfarm-rig-${MAC_SUFFIX}"
 sed -i "s/mfarm-rig/mfarm-rig-${MAC_SUFFIX}/g" /etc/hosts
 # Update xmrig config with actual hostname
 sed -i "s/%HOSTNAME%/mfarm-rig-${MAC_SUFFIX}/g" /opt/mfarm/miners/xmrig-config.json
-nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+# Only run nvidia-xconfig if NVIDIA hardware is actually present. Calling it
+# unconditionally on CPU-only rigs (mini-series) prints a misleading
+# "ERROR: Unable to determine number of GPUs in system" into firstboot.log
+# even though everything is fine — the rig just has no NVIDIA card.
+if lspci | grep -qi nvidia; then
+    nvidia-xconfig --enable-all-gpus --cool-bits=31 --allow-empty-initial-configuration 2>/dev/null || true
+fi
 mkdir -p /var/run/mfarm
 python3 -c "
 import json,subprocess,os,socket
