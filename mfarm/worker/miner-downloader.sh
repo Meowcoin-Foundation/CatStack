@@ -74,6 +74,11 @@ download "srbminer" \
     "https://github.com/doktor83/SRBMiner-Multi/releases/download/2.8.3/SRBMiner-Multi-2-8-3-Linux.tar.xz" \
     "SRBMiner-Multi"
 
+# Rigel (NVIDIA — xelishash, autolykos2, kaspa, ironfish, etc.)
+download "rigel" \
+    "https://github.com/rigelminer/rigel/releases/download/1.23.2/rigel-1.23.2-linux.tar.gz" \
+    "rigel"
+
 echo ""
 echo "=== Installed miners ==="
 ls -lh "$DEST/"

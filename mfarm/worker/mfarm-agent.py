@@ -641,12 +641,79 @@ def query_kerrigan_log(port: int) -> dict | None:
     }
 
 
+def _rigel_hashrate(value) -> float:
+    """Rigel reports hashrate as either a bare number or [number, unit]."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, list) and value:
+        try:
+            return float(value[0])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def query_rigel_api(port: int) -> dict | None:
+    """Query Rigel via HTTP API at /."""
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.read().decode())
+        conn.close()
+
+        gpu_stats = []
+        for gpu in data.get("devices", []):
+            hr = gpu.get("hashrate", 0)
+            # Per-device hashrate: usually [N, unit], occasionally a dict
+            # keyed by algo name on dual-mining builds.
+            if isinstance(hr, dict):
+                hr_val = sum(_rigel_hashrate(v) for v in hr.values())
+            else:
+                hr_val = _rigel_hashrate(hr)
+            gpu_stats.append({
+                "hashrate": hr_val,
+                "temp": int(gpu.get("temperature", 0) or 0),
+                "fan": int(gpu.get("fan_speed", 0) or 0),
+                "power": float(gpu.get("power", 0) or 0),
+            })
+
+        total = data.get("hashrate", {})
+        if isinstance(total, dict):
+            total_hr = _rigel_hashrate(total.get("total", 0))
+        else:
+            total_hr = _rigel_hashrate(total)
+        if not total_hr and gpu_stats:
+            total_hr = sum(g["hashrate"] for g in gpu_stats)
+
+        shares = data.get("shares", {}) or {}
+        algos = data.get("algorithms", []) or []
+        algo = algos[0] if isinstance(algos, list) and algos else ""
+        if isinstance(algo, dict):
+            algo = algo.get("name", "")
+
+        return {
+            "hashrate": total_hr,
+            "accepted": int(shares.get("accepted", 0) or 0),
+            "rejected": int(shares.get("rejected", 0) or 0),
+            "algo": algo,
+            "uptime_secs": int(data.get("uptime", 0) or 0),
+            "hashrate_units": "H/s",
+            "gpu_stats": gpu_stats,
+        }
+    except Exception:
+        return None
+
+
 API_PARSERS = {
     "ccminer_tcp": query_ccminer_api,
     "trex_http": query_trex_api,
     "lolminer_http": query_lolminer_api,
     "xmrig_http": query_xmrig_api,
     "miniz_http": query_miniz_api,
+    "rigel_http": query_rigel_api,
     "kerrigan_log": query_kerrigan_log,
 }
 
@@ -661,6 +728,7 @@ MINER_API_TYPES = {
     "xmrig": "xmrig_http",
     "miniz": "miniz_http",
     "miniZ": "miniz_http",
+    "rigel": "rigel_http",
     "kerrigan": "kerrigan_log",
 }
 
@@ -913,6 +981,11 @@ class MinerManager:
             cmd = [binary, "--algo", algo_param,
                    "--url", f"{stratum_user}@{pool}",
                    f"--telemetry={port}"]
+
+        elif miner == "rigel":
+            wallet_worker = f"{wallet}.{worker}"
+            cmd = [binary, "-a", algo, "-o", pool, "-u", wallet_worker,
+                   "-p", password, "--api-bind", f"0.0.0.0:{port}"]
 
         elif miner == "kerrigan":
             # Kerrigan's launcher is multi_gpu.sh <wallet> <worker> <host> <port>.
