@@ -75,6 +75,7 @@ class Config:
         self.api_ports = {
             "ccminer": 4068, "trex": 4067, "lolminer": 44444,
             "cpuminer-opt": 4048, "xmrig": 44445, "miniz": 20000,
+            "rigel": 4067,
         }
 
     def load(self):
