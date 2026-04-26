@@ -760,17 +760,38 @@ async function openRig(name) {
     <div style="position:relative;height:200px;margin-top:8px"><canvas id="hr-chart"></canvas></div>
   </div>`;
 
-  // Miner section
-  html += `<div class="detail-section">
-    <h3>Miner</h3>
-    <div class="card-row"><span class="label">Software</span><span class="value">${m.name || '-'} ${m.version || ''}</span></div>
-    <div class="card-row"><span class="label">Algorithm</span><span class="value">${m.algo || '-'}</span></div>
-    <div class="card-row"><span class="label">Pool</span><span class="value" style="word-break:break-all">${m.pool || '-'}</span></div>
-    <div class="card-row"><span class="label">Hashrate</span><span class="value">${m.hashrate ? fmtHash(m.hashrate) : '-'}</span></div>
-    <div class="card-row"><span class="label">Accepted</span><span class="value" style="color:var(--green)">${m.accepted || 0}</span></div>
-    <div class="card-row"><span class="label">Rejected</span><span class="value" style="color:var(--red)">${m.rejected || 0}</span></div>
-    <div class="card-row"><span class="label">Restarts</span><span class="value">${m.restarts || 0}</span></div>
-  </div>`;
+  // Miner section(s) — show GPU and CPU separately when both are running
+  // (dual-mining setups like rigAI-02 have ccminer+XMRig active simultaneously).
+  const cm2 = s.cpu_miner || {};
+  const showGpuBlock = !!(m.name || m.algo || m.hashrate || m.running);
+  const showCpuBlock = !!(cm2.algo || cm2.hashrate || cm2.running);
+  // Header label: "GPU Miner" / "CPU Miner" only if both blocks render, to
+  // avoid redundant labeling on single-miner rigs.
+  const gpuLabel = (showGpuBlock && showCpuBlock) ? 'GPU Miner' : 'Miner';
+  if (showGpuBlock) {
+    html += `<div class="detail-section">
+      <h3>${gpuLabel}</h3>
+      <div class="card-row"><span class="label">Software</span><span class="value">${m.name || '-'} ${m.version || ''}</span></div>
+      <div class="card-row"><span class="label">Algorithm</span><span class="value">${m.algo || '-'}</span></div>
+      <div class="card-row"><span class="label">Pool</span><span class="value" style="word-break:break-all">${m.pool || '-'}</span></div>
+      <div class="card-row"><span class="label">Hashrate</span><span class="value">${m.hashrate ? fmtHash(m.hashrate) : '-'}</span></div>
+      <div class="card-row"><span class="label">Accepted</span><span class="value" style="color:var(--green)">${m.accepted || 0}</span></div>
+      <div class="card-row"><span class="label">Rejected</span><span class="value" style="color:var(--red)">${m.rejected || 0}</span></div>
+      <div class="card-row"><span class="label">Restarts</span><span class="value">${m.restarts || 0}</span></div>
+    </div>`;
+  }
+  if (showCpuBlock) {
+    html += `<div class="detail-section">
+      <h3>CPU Miner</h3>
+      <div class="card-row"><span class="label">Software</span><span class="value">${cm2.name || 'XMRig'} ${cm2.version || ''}</span></div>
+      <div class="card-row"><span class="label">Algorithm</span><span class="value">${cm2.algo || '-'}</span></div>
+      <div class="card-row"><span class="label">Pool</span><span class="value" style="word-break:break-all">${cm2.pool || '-'}</span></div>
+      <div class="card-row"><span class="label">Hashrate</span><span class="value">${cm2.hashrate ? fmtHash(cm2.hashrate) : '-'}</span></div>
+      <div class="card-row"><span class="label">Accepted</span><span class="value" style="color:var(--green)">${cm2.accepted || 0}</span></div>
+      <div class="card-row"><span class="label">Rejected</span><span class="value" style="color:var(--red)">${cm2.rejected || 0}</span></div>
+      <div class="card-row"><span class="label">Restarts</span><span class="value">${cm2.restarts || 0}</span></div>
+    </div>`;
+  }
 
   // ── GPU Overclock (inline, HiveOS-style) ──
   // Six direct-input fields. Empty = leave that setting alone / clear it.
@@ -1661,20 +1682,34 @@ function fmtUptime(secs) {
 function renderDiscovered(rigs) {
   const section = document.getElementById('discovered-section');
   const list = document.getElementById('discovered-list');
-  const newRigs = rigs.filter(r => !r.already_added);
-  if (!newRigs.length) { section.style.display = 'none'; return; }
+  // Backend's /api/discovered already filters out claimed-MAC + IP-match +
+  // hostname-match rigs, so anything that comes through is genuinely new.
+  if (!rigs.length) { section.style.display = 'none'; return; }
   section.style.display = 'block';
   list.innerHTML = `<table class="data-table">
     <tr><th>Hostname</th><th>IP</th><th>MAC</th><th>Interface</th><th>Seen</th><th>Action</th></tr>
-    ${newRigs.map(r => `<tr>
+    ${rigs.map(r => `<tr>
       <td style="color:var(--cyan);font-weight:600">${r.hostname}</td>
       <td>${r.ip}</td>
       <td style="font-family:monospace">${r.mac}</td>
       <td>${r.interface}</td>
       <td>${r.age_secs < 60 ? r.age_secs + 's ago' : Math.round(r.age_secs/60) + 'm ago'}</td>
-      <td><button class="btn success" onclick="quickAddRig('${r.ip}','${r.hostname}')">+ Add</button></td>
+      <td>
+        <button class="btn success" onclick="quickAddRig('${r.ip}','${r.hostname}')">+ Add</button>
+        <button class="btn" onclick="dismissDiscovered('${r.mac}')" title="Hide this rig from the discovery list (won't appear again)">Dismiss</button>
+      </td>
     </tr>`).join('')}
   </table>`;
+}
+
+async function dismissDiscovered(mac) {
+  try {
+    await fetch(`/api/discovered/${encodeURIComponent(mac)}/dismiss`, { method: 'POST' });
+    // Re-fetch to update the popup immediately.
+    const res = await fetch('/api/discovered');
+    const rigs = await res.json();
+    renderDiscovered(rigs);
+  } catch(e) { alert(e.message); }
 }
 
 async function quickAddRig(ip, hostname) {

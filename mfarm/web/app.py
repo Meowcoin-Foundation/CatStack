@@ -116,6 +116,33 @@ def _build_rigs_payload() -> list[dict]:
 
 _discovered_rigs: dict[str, dict] = {}  # MAC -> {ip, hostname, last_seen}
 
+# MACs that have been claimed (rig already in DB or user dismissed). Persists
+# across server restarts so a once-added rig never reappears in the discovery
+# popup even when its IP changes via DHCP. Keyed by MAC because that's the
+# only stable identifier — IP rotates, hostname can be edited.
+_dismissed_macs_path = Path("/var/lib/mfarm/dismissed_macs.json")
+_dismissed_macs: set[str] = set()
+
+
+def _load_dismissed_macs() -> set[str]:
+    try:
+        if _dismissed_macs_path.exists():
+            return set(json.loads(_dismissed_macs_path.read_text()))
+    except Exception as e:
+        log.warning("Failed to load dismissed MACs: %s", e)
+    return set()
+
+
+def _save_dismissed_macs(macs: set[str]) -> None:
+    try:
+        _dismissed_macs_path.parent.mkdir(parents=True, exist_ok=True)
+        _dismissed_macs_path.write_text(json.dumps(sorted(macs)))
+    except Exception as e:
+        log.warning("Failed to save dismissed MACs: %s", e)
+
+
+_dismissed_macs = _load_dismissed_macs()
+
 
 async def udp_listener():
     """Listen for phone-home UDP broadcasts from MeowOS rigs."""

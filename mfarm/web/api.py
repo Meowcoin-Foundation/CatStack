@@ -64,6 +64,22 @@ def create_rig(data: RigCreate):
               ssh_user=data.ssh_user, ssh_key_path=data.ssh_key_path,
               group_id=group_id, notes=data.notes)
     rig.save(db)
+
+    # Auto-dismiss any discovered rig whose IP matches what we just added.
+    # The dismissed-macs set otherwise gets populated by the next /discovered
+    # poll, but that's a 15-second window where the popup keeps re-rendering.
+    try:
+        from mfarm.web.app import _discovered_rigs, _dismissed_macs, _save_dismissed_macs
+        changed = False
+        for mac, info in _discovered_rigs.items():
+            if info.get("ip") == data.host and mac not in _dismissed_macs:
+                _dismissed_macs.add(mac)
+                changed = True
+        if changed:
+            _save_dismissed_macs(_dismissed_macs)
+    except Exception:
+        pass
+
     return _rig_to_dict(Rig.get_by_name(db, data.name))
 
 
@@ -630,19 +646,54 @@ async def phonehome(body: dict):
 
 @router.get("/discovered")
 def get_discovered():
-    """List all rigs that have phoned home but aren't added yet."""
-    from mfarm.web.app import _discovered_rigs
+    """List rigs that have phoned home but aren't claimed by an existing DB
+    entry or user-dismissed.
+
+    A discovered rig is suppressed when ANY of these match an existing rig:
+      1. MAC is in the persistent _dismissed_macs set (manual dismiss, or
+         auto-dismissed because of IP/hostname match below).
+      2. Phoned-home IP equals rig.host.
+      3. Phoned-home hostname equals rig.name (case-insensitive).
+
+    Cases 2 and 3 also auto-promote the MAC into _dismissed_macs so the rig
+    stays suppressed if its IP later changes (DHCP renew) or its hostname
+    drifts. Without this, the popup re-fires every poll for already-claimed
+    rigs whose IP changed.
+    """
+    from mfarm.web.app import _discovered_rigs, _dismissed_macs, _save_dismissed_macs
     import time
     db = get_db()
-    existing = {r.host for r in Rig.get_all(db)}
+    rigs = Rig.get_all(db)
+    existing_hosts = {r.host for r in rigs}
+    existing_names = {r.name.lower() for r in rigs if r.name}
     result = []
+    newly_dismissed = False
     for mac, info in _discovered_rigs.items():
-        if info["ip"] in existing:
-            continue  # Already added - don't show
+        if mac in _dismissed_macs:
+            continue
+        ip = info.get("ip", "")
+        hostname = (info.get("hostname") or "").lower()
+        if ip in existing_hosts or (hostname and hostname in existing_names):
+            _dismissed_macs.add(mac)
+            newly_dismissed = True
+            continue
         info_copy = dict(info)
         info_copy["age_secs"] = round(time.time() - info.get("last_seen", 0))
         result.append(info_copy)
+    if newly_dismissed:
+        _save_dismissed_macs(_dismissed_macs)
     return result
+
+
+@router.post("/discovered/{mac}/dismiss")
+def dismiss_discovered(mac: str):
+    """Mark a discovered rig's MAC as dismissed so it stops showing in
+    the popup. Persists across server restarts."""
+    from mfarm.web.app import _dismissed_macs, _save_dismissed_macs
+    mac = mac.lower()
+    _dismissed_macs.add(mac)
+    _save_dismissed_macs(_dismissed_macs)
+    return {"status": "dismissed", "mac": mac}
 
 
 # ── MAC Address Lookup ───────────────────────────────────────────────
