@@ -302,6 +302,84 @@ def _bootstrap_root_ssh(host: str, port: int, pubkey: str) -> tuple[bool, str]:
         return False, f"sudo exec failed: {e}"
 
 
+# ── Miner repair / staleness fixup ──────────────────────────────────
+
+# Embedded shell snippet that walks /opt/mfarm/miners/ and re-extracts any
+# binary that's actually a gzipped tarball (magic 1f 8b). Older MeowOS images
+# shipped with a downloader that fell through to `mv archive.tar.gz xmrig`
+# when /usr/bin/file wasn't installed, leaving the rig with an unrunnable
+# blob and a "[Errno 8] Exec format error" loop in agent.log. Idempotent —
+# binaries that already start with ELF (7f 45 4c 46) are skipped.
+_REPAIR_MINERS_SCRIPT = r"""
+set -u
+fixed=0
+for binname in xmrig t-rex lolMiner miniZ rigel cpuminer ccminer; do
+    path=/opt/mfarm/miners/$binname
+    [ -f "$path" ] || continue
+    magic=$(head -c 4 "$path" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$magic" in
+        7f454c46) continue ;;  # ELF — already a real binary
+        1f8b*)
+            tmp=$(mktemp -d)
+            cp "$path" "$tmp/archive.tar.gz"
+            (cd "$tmp" && tar xzf archive.tar.gz 2>/dev/null) || { rm -rf "$tmp"; continue; }
+            bin=$(find "$tmp" -type f -name "$binname" -executable 2>/dev/null | head -1)
+            [ -z "$bin" ] && bin=$(find "$tmp" -type f -executable -size +500k 2>/dev/null | head -1)
+            if [ -n "$bin" ] && [ "$(head -c 4 "$bin" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+                sudo cp "$bin" "$path"
+                sudo chmod +x "$path"
+                echo "REPAIRED: $path"
+                fixed=$((fixed + 1))
+            fi
+            rm -rf "$tmp"
+            ;;
+    esac
+done
+echo "repair-summary: fixed=$fixed"
+"""
+
+
+def _push_downloader_and_repair(rig) -> tuple[bool, str]:
+    """Push the latest miner-downloader.sh and repair any gzipped-blob
+    miner binaries on the rig. Triggered after SSH bootstrap so freshly-
+    added rigs get the fix even if their image predated the downloader's
+    magic-byte detection.
+    """
+    pool = get_pool()
+    from pathlib import Path
+
+    msgs = []
+
+    # 1. Push the latest miner-downloader.sh from this repo to the rig.
+    src = Path(__file__).resolve().parent.parent / "worker" / "miner-downloader.sh"
+    if src.is_file():
+        try:
+            pool.upload_string(rig, src.read_text(encoding="utf-8"), "/opt/mfarm/miner-downloader.sh")
+            pool.exec(rig, "sudo chmod +x /opt/mfarm/miner-downloader.sh", timeout=5)
+            msgs.append("downloader updated")
+        except Exception as e:
+            msgs.append(f"downloader push failed: {e}")
+    else:
+        msgs.append(f"downloader source not found at {src}")
+
+    # 2. Walk /opt/mfarm/miners/ and fix any gzipped-blob binaries in place.
+    try:
+        out, _, rc = pool.exec(rig, _REPAIR_MINERS_SCRIPT, timeout=60)
+        msgs.append(out.strip().splitlines()[-1] if out.strip() else "repair: no output")
+    except Exception as e:
+        msgs.append(f"repair failed: {e}")
+        return False, "; ".join(msgs)
+
+    # 3. Restart mfarm-agent so the watchdog tries the fixed binary.
+    try:
+        pool.exec(rig, "sudo systemctl restart mfarm-agent", timeout=15)
+        msgs.append("mfarm-agent restarted")
+    except Exception as e:
+        msgs.append(f"agent restart failed: {e}")
+
+    return True, "; ".join(msgs)
+
+
 @router.post("/rigs/{name}/push-key")
 async def push_ssh_key(name: str):
     """Deploy the dashboard's SSH public key to root@<rig> using the default
@@ -334,7 +412,19 @@ async def push_ssh_key(name: str):
             pool._clients.pop(rig.name, None)
     except Exception:
         pass
-    return {"status": "pushed", "message": message}
+    # Now that we have root SSH, push the latest miner-downloader.sh and
+    # repair any gzipped-blob miner binaries the rig was flashed with. This
+    # turns "rig added → flight sheet apply → miner won't start" into
+    # "rig added → just works" without operator intervention.
+    repair_ok, repair_msg = await loop.run_in_executor(
+        _executor, lambda: _push_downloader_and_repair(rig),
+    )
+    return {
+        "status": "pushed",
+        "message": message,
+        "repair": repair_msg,
+        "repair_ok": repair_ok,
+    }
 
 
 def _rig_to_dict(r: Rig) -> dict:
@@ -507,12 +597,19 @@ async def apply_flightsheet(fs_name: str, target: str):
                 if not ok:
                     results[rig.name] = f"error: SSH auth failed; auto-bootstrap also failed: {msg}"
                     continue
-                # Drop the failed cached connection and retry.
+                # Drop the failed cached connection.
                 try:
                     with pool._lock:
                         pool._clients.pop(rig.name, None)
                 except Exception:
                     pass
+                # Hot-patch the miner-downloader and repair any gzipped-
+                # blob binaries left over from older MeowOS images. Failure
+                # here doesn't block the apply — if the rig already has
+                # working binaries this is a no-op.
+                await loop.run_in_executor(
+                    _executor, lambda r=rig: _push_downloader_and_repair(r),
+                )
                 try:
                     await _apply()
                     results[rig.name] = "applied (after auto-bootstrap)"
@@ -936,19 +1033,44 @@ def get_miners():
 
 @router.post("/rigs/{name}/update-miners")
 async def update_miners(name: str):
-    """Update all miner binaries on a rig."""
+    """Update all miner binaries on a rig.
+
+    Step 1: push the latest miner-downloader.sh from this checkout so the
+    rig has the magic-byte-detecting version (rigs flashed before that fix
+    have a downloader that silently leaves .tar.gz blobs at /opt/mfarm/
+    miners/xmrig and triggers Exec format error in the agent's restart loop).
+
+    Step 2: scan /opt/mfarm/miners/ and re-extract any gzipped blob in
+    place, then restart mfarm-agent. Same logic the bootstrap path uses,
+    but reachable via the existing 'Update Miners' button.
+
+    Step 3: run the (now-current) downloader to pull any newer releases.
+    """
     db = get_db()
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404, f"Rig '{name}' not found")
+    pool = get_pool()
     loop = asyncio.get_event_loop()
+    parts = []
     try:
-        result = await loop.run_in_executor(
-            _executor, lambda r=rig: pool.exec(r, "sudo bash /opt/mfarm/miner-downloader.sh all", timeout=300)
+        # Steps 1+2 (push fresh downloader + repair gzipped blobs + restart)
+        ok, msg = await loop.run_in_executor(
+            _executor, lambda r=rig: _push_downloader_and_repair(r),
         )
-        return {"status": "updated", "output": result.get("stdout", "")}
+        parts.append(f"prep: {msg}")
+        if not ok:
+            return {"status": "error", "error": "; ".join(parts)}
+        # Step 3 (run the now-current downloader to pull updates)
+        out, err, rc = await loop.run_in_executor(
+            _executor,
+            lambda r=rig: pool.exec(r, "sudo bash /opt/mfarm/miner-downloader.sh all", timeout=300),
+        )
+        parts.append(f"download rc={rc}")
+        return {"status": "updated", "output": out, "log": "\n".join(parts)}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        parts.append(f"exception: {e}")
+        return {"status": "error", "error": "; ".join(parts)}
 
 
 @router.get("/version")
