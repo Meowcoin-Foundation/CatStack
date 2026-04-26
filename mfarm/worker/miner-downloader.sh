@@ -15,16 +15,31 @@ download() {
     rm -rf "dl-$name"; mkdir "dl-$name"; cd "dl-$name"
     wget -q --show-progress "$url" -O archive 2>&1 || { echo "  FAILED: $name"; return; }
 
-    # Extract based on file type
-    if file archive | grep -q "gzip"; then
-        tar xzf archive 2>/dev/null
-    elif file archive | grep -q "Zip\|zip"; then
-        unzip -q archive 2>/dev/null
-    elif file archive | grep -q "xz"; then
-        tar xJf archive 2>/dev/null
-    else
-        mv archive "$binary"
-    fi
+    # Detect archive type from magic bytes (NOT `file` — minimal MeowOS images
+    # don't ship `file` and the downloader silently fell through to `mv archive
+    # "$binary"`, leaving a still-gzipped blob that fails with "Exec format error"
+    # at miner launch time. Observed on mini01 with xmrig.tar.gz on 2026-04-26.)
+    local magic
+    magic=$(head -c 4 archive 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$magic" in
+        1f8b*)             tar xzf archive 2>/dev/null ;;            # gzip
+        504b0304|504b0506) unzip -q archive 2>/dev/null ;;           # zip
+        fd377a58|377abcaf) tar xJf archive 2>/dev/null || tar xf archive 2>/dev/null ;;  # xz / 7z
+        4c5a4950)          tar xf archive 2>/dev/null ;;             # lzip
+        425a68*)           tar xjf archive 2>/dev/null ;;            # bzip2
+        7f454c46|cffaedfe) mv archive "$binary" ;;                   # ELF / Mach-O — raw binary
+        *)
+            # Unknown magic: fall back to extension-based detection
+            case "$url" in
+                *.tar.gz|*.tgz)  tar xzf archive 2>/dev/null ;;
+                *.tar.xz|*.txz)  tar xJf archive 2>/dev/null ;;
+                *.tar.bz2|*.tbz) tar xjf archive 2>/dev/null ;;
+                *.tar)           tar xf archive 2>/dev/null ;;
+                *.zip)           unzip -q archive 2>/dev/null ;;
+                *)               mv archive "$binary" ;;
+            esac
+            ;;
+    esac
 
     # Find the binary
     BIN=$(find . -name "$binary" -type f | head -1)
