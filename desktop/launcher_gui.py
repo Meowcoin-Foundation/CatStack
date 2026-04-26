@@ -160,12 +160,33 @@ def main() -> int:
     )
     # The launcher exe for Chromium browsers often exits immediately after
     # signaling an existing browser session, so we can't use proc.wait() to
-    # detect window close. Poll the process list for an msedge/chrome
-    # process whose command line contains our --app=URL marker.
-    time.sleep(3)
-    while _app_window_running(url_marker):
-        time.sleep(3)
-    return 0
+    # detect window close. Instead: wait for the app window to actually
+    # appear (cold-start Edge can take 5-10s), then poll for it to disappear.
+    # Tolerate short transient misses — Edge restructures its process tree
+    # during navigation, briefly losing the --app=URL marker.
+    appeared = False
+    for _ in range(60):                  # up to 30s for the window to appear
+        if _app_window_running(url_marker):
+            appeared = True
+            break
+        time.sleep(0.5)
+
+    if not appeared:
+        # Edge never showed up with our URL. Best we can do is keep the server
+        # running so whatever browser the user does have can reach it.
+        webbrowser.open(url)
+        server_thread.join()
+        return 0
+
+    misses = 0
+    while True:
+        time.sleep(2)
+        if _app_window_running(url_marker):
+            misses = 0
+        else:
+            misses += 1
+            if misses >= 3:              # 6s without the window -> exit
+                return 0
 
 
 def _sweep_old_profile_dirs(keep: str) -> None:
