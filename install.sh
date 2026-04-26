@@ -43,7 +43,7 @@ install_mfarm() {
 
     if command -v mfarm &>/dev/null; then
         warn "mfarm is already installed ($(mfarm --version 2>/dev/null || echo 'unknown version'))"
-        read -rp "  Reinstall anyway? [y/N] " CONFIRM
+        read -rp "  Reinstall anyway? [y/N] " CONFIRM </dev/tty
         [[ "${CONFIRM:-N}" =~ ^[Yy] ]] || return
     fi
 
@@ -71,7 +71,7 @@ uninstall_mfarm() {
     command -v mfarm &>/dev/null || die "mfarm is not installed."
 
     warn "This will remove mfarm from your system."
-    read -rp "  Are you sure? [y/N] " CONFIRM
+    read -rp "  Are you sure? [y/N] " CONFIRM </dev/tty
     [[ "${CONFIRM:-N}" =~ ^[Yy] ]] || { echo "Aborted."; return; }
 
     info "Removing mfarm..."
@@ -82,7 +82,7 @@ uninstall_mfarm() {
     if [[ -d "${HOME}/.mfarm" ]]; then
         echo ""
         warn "Found farm data at ~/.mfarm (rigs, flight sheets, config)"
-        read -rp "  Remove it too? [y/N] " REMOVE_DATA
+        read -rp "  Remove it too? [y/N] " REMOVE_DATA </dev/tty
         if [[ "${REMOVE_DATA:-N}" =~ ^[Yy] ]]; then
             rm -rf "${HOME}/.mfarm"
             success "Farm data removed"
@@ -98,9 +98,9 @@ setup_rig() {
     echo -e "${DIM}(You can add more later with: mfarm rig add)${RESET}"
     echo ""
 
-    read -rp "  Rig name (e.g. rig-01): " RIG_NAME
-    read -rp "  Rig IP address:          " RIG_HOST
-    read -rp "  SSH user [root]:         " RIG_USER
+    read -rp "  Rig name (e.g. rig-01): " RIG_NAME </dev/tty
+    read -rp "  Rig IP address:          " RIG_HOST </dev/tty
+    read -rp "  SSH user [root]:         " RIG_USER </dev/tty
     RIG_USER="${RIG_USER:-root}"
 
     info "Adding rig '${RIG_NAME}' (${RIG_HOST})..."
@@ -109,7 +109,7 @@ setup_rig() {
     success "Rig added"
 
     echo ""
-    read -rp "Deploy mfarm agent to ${RIG_NAME} now? [Y/n] " DEPLOY
+    read -rp "Deploy mfarm agent to ${RIG_NAME} now? [Y/n] " DEPLOY </dev/tty
     DEPLOY="${DEPLOY:-Y}"
 
     if [[ "$DEPLOY" =~ ^[Yy] ]]; then
@@ -143,7 +143,7 @@ menu() {
     echo -e "  ${CYAN}3)${RESET} Uninstall"
     echo -e "  ${CYAN}4)${RESET} Exit"
     echo ""
-    read -rp "  Choose [1-4]: " CHOICE
+    read -rp "  Choose [1-4]: " CHOICE </dev/tty
 
     case "${CHOICE}" in
         1) install_mfarm ;;
@@ -153,9 +153,6 @@ menu() {
         *) die "Invalid choice" ;;
     esac
 }
-
-# Ensure interactive prompts work even when piped (curl | bash)
-exec </dev/tty
 
 
 print_logo
