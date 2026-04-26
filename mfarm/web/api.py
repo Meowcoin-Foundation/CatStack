@@ -217,6 +217,126 @@ async def stop_miner(name: str):
         raise HTTPException(500, str(e))
 
 
+# Default fallback credential for freshly-flashed MeowOS rigs. The miner user
+# has NOPASSWD sudo, so this gives root SSH access too. If an operator hardens
+# their image they should override this via the MEOWOS_DEFAULT_USER /
+# MEOWOS_DEFAULT_PASSWORD env vars.
+import os as _os
+
+_DEFAULT_BOOTSTRAP_USER = _os.environ.get("MEOWOS_DEFAULT_USER", "miner")
+_DEFAULT_BOOTSTRAP_PASSWORD = _os.environ.get("MEOWOS_DEFAULT_PASSWORD", "mfarm")
+
+
+def _find_dashboard_pubkey() -> str | None:
+    """Locate a public key the dashboard can deploy to new rigs.
+
+    Searches common SSH key paths. Returns the key text (one line, no trailing
+    newline) or None if nothing is found. Does NOT generate a new key — that's
+    too aggressive a default.
+    """
+    from pathlib import Path
+    candidates = []
+    home = Path.home()
+    for stem in ("id_ed25519", "id_ecdsa", "id_rsa"):
+        candidates.append(home / ".ssh" / f"{stem}.pub")
+    # System-wide install fallback
+    candidates.append(Path("/etc/mfarm/dashboard_id_ed25519.pub"))
+    for path in candidates:
+        try:
+            if path.is_file():
+                key = path.read_text().strip()
+                if key.startswith(("ssh-", "ecdsa-")):
+                    return key
+        except Exception:
+            continue
+    return None
+
+
+def _bootstrap_root_ssh(host: str, port: int, pubkey: str) -> tuple[bool, str]:
+    """Push our public key to root@host using miner+password+sudo.
+
+    Returns (success, message). Used by /push-key endpoint and by
+    apply_flightsheet's AuthenticationException fallback. Synchronous —
+    callers should run in an executor.
+    """
+    import paramiko as _paramiko
+    client = _paramiko.SSHClient()
+    client.set_missing_host_key_policy(_paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host, port=port,
+            username=_DEFAULT_BOOTSTRAP_USER,
+            password=_DEFAULT_BOOTSTRAP_PASSWORD,
+            timeout=10, allow_agent=False, look_for_keys=False,
+        )
+    except _paramiko.AuthenticationException:
+        return False, (
+            f"Could not authenticate as '{_DEFAULT_BOOTSTRAP_USER}' with the default "
+            f"MeowOS password. The rig was flashed with a custom image — push the "
+            f"key manually with `ssh-copy-id root@{host}`."
+        )
+    except Exception as e:
+        return False, f"SSH connect failed: {e}"
+
+    # Use sudo (NOPASSWD on standard MeowOS) to overwrite root's authorized_keys.
+    # Single line in the heredoc — escaping the public key safely.
+    safe = pubkey.replace("'", "'\"'\"'")
+    cmd = (
+        "sudo mkdir -p /root/.ssh && "
+        "sudo chmod 700 /root/.ssh && "
+        f"echo '{safe}' | sudo tee -a /root/.ssh/authorized_keys >/dev/null && "
+        "sudo chmod 600 /root/.ssh/authorized_keys && "
+        "sudo chown root:root /root/.ssh /root/.ssh/authorized_keys"
+    )
+    try:
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=15)
+        rc = stdout.channel.recv_exit_status()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        client.close()
+        if rc != 0:
+            return False, f"sudo failed (rc={rc}): {err or 'no stderr'}"
+        return True, f"Key deployed to root@{host}"
+    except Exception as e:
+        try: client.close()
+        except: pass
+        return False, f"sudo exec failed: {e}"
+
+
+@router.post("/rigs/{name}/push-key")
+async def push_ssh_key(name: str):
+    """Deploy the dashboard's SSH public key to root@<rig> using the default
+    miner+sudo path. Used as a one-click bootstrap for freshly-flashed rigs
+    where root SSH key auth isn't set up yet."""
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404)
+    pubkey = _find_dashboard_pubkey()
+    if not pubkey:
+        raise HTTPException(
+            500,
+            "No dashboard SSH public key found. Looked in ~/.ssh/id_ed25519.pub, "
+            "~/.ssh/id_ecdsa.pub, ~/.ssh/id_rsa.pub, /etc/mfarm/dashboard_id_ed25519.pub. "
+            "Generate one with `ssh-keygen -t ed25519` and retry."
+        )
+    loop = asyncio.get_event_loop()
+    success, message = await loop.run_in_executor(
+        _executor,
+        lambda: _bootstrap_root_ssh(rig.host, rig.ssh_port, pubkey),
+    )
+    if not success:
+        raise HTTPException(500, message)
+    # Drop any cached SSH connection to this rig so subsequent ops use the
+    # newly-authorized key path.
+    try:
+        pool = get_pool()
+        with pool._lock:
+            pool._clients.pop(rig.name, None)
+    except Exception:
+        pass
+    return {"status": "pushed", "message": message}
+
+
 def _rig_to_dict(r: Rig) -> dict:
     return {
         "name": r.name, "host": r.host, "ssh_port": r.ssh_port,
@@ -357,31 +477,70 @@ async def apply_flightsheet(fs_name: str, target: str):
                     )
                     pool.upload_string(r, c, "/etc/mfarm/config.json")
 
-            try:
+            async def _apply():
                 await loop.run_in_executor(_executor, _upload_config)
                 await loop.run_in_executor(
                     _executor,
                     lambda r=rig: pool.upload_string(r, "apply_config", "/var/run/mfarm/command")
                 )
+
+            try:
+                await _apply()
                 results[rig.name] = "applied"
             except paramiko.AuthenticationException:
                 # SSH key isn't authorized for the configured user (typically
-                # root on freshly-imaged rigs). The miner user has NOPASSWD
-                # sudo on standard MeowOS; deploy our public key to root via
-                # miner+sudo, then retry. If miner is also not authorized,
-                # surface a clear bootstrap error.
-                results[rig.name] = (
-                    f"error: SSH authentication failed for user '{rig.ssh_user}'. "
-                    f"Either change the rig's SSH user to 'miner' (which has NOPASSWD sudo), "
-                    f"or manually deploy your SSH public key to {rig.ssh_user}@{rig.host} "
-                    f"(e.g. ssh-copy-id, then click apply again)."
+                # root on freshly-imaged rigs). Auto-bootstrap: SSH as miner
+                # with the default MeowOS password and deploy our public key
+                # to root via NOPASSWD sudo, then retry the original op once.
+                pubkey = _find_dashboard_pubkey()
+                if not pubkey:
+                    results[rig.name] = (
+                        f"error: SSH auth failed for '{rig.ssh_user}', and the "
+                        f"dashboard has no public key to bootstrap with. Generate "
+                        f"one with `ssh-keygen -t ed25519` and try again."
+                    )
+                    continue
+                ok, msg = await loop.run_in_executor(
+                    _executor,
+                    lambda r=rig, k=pubkey: _bootstrap_root_ssh(r.host, r.ssh_port, k),
                 )
+                if not ok:
+                    results[rig.name] = f"error: SSH auth failed; auto-bootstrap also failed: {msg}"
+                    continue
+                # Drop the failed cached connection and retry.
+                try:
+                    with pool._lock:
+                        pool._clients.pop(rig.name, None)
+                except Exception:
+                    pass
+                try:
+                    await _apply()
+                    results[rig.name] = "applied (after auto-bootstrap)"
+                except Exception as e2:
+                    results[rig.name] = f"error: bootstrap succeeded but retry failed: {e2}"
         except paramiko.AuthenticationException:
-            # Same fallback for the initial pool.exec at line 309 (read-config).
+            # Auth failed at the initial cat /etc/mfarm/config.json read. Same
+            # auto-bootstrap path as above, then re-run the whole flow once
+            # so the read+upload succeed against the now-authorized key.
+            pubkey = _find_dashboard_pubkey()
+            if not pubkey:
+                results[rig.name] = (
+                    f"error: SSH auth failed for '{rig.ssh_user}', and the "
+                    f"dashboard has no public key to bootstrap with. Generate "
+                    f"one with `ssh-keygen -t ed25519` and try again."
+                )
+                continue
+            ok, msg = await loop.run_in_executor(
+                _executor,
+                lambda r=rig, k=pubkey: _bootstrap_root_ssh(r.host, r.ssh_port, k),
+            )
+            if not ok:
+                results[rig.name] = f"error: SSH auth failed; auto-bootstrap also failed: {msg}"
+                continue
             results[rig.name] = (
-                f"error: SSH authentication failed for user '{rig.ssh_user}'. "
-                f"Either change the rig's SSH user to 'miner' (which has NOPASSWD sudo), "
-                f"or manually deploy your SSH public key to {rig.ssh_user}@{rig.host}."
+                "bootstrap-only: SSH key deployed, but flight-sheet apply was not "
+                "retried (initial config read failed before key was deployed). "
+                "Click Apply again."
             )
         except Exception as e:
             results[rig.name] = f"error: {e}"
