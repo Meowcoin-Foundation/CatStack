@@ -35,6 +35,19 @@ if [[ -f /tmp/mfarm-deploy/miner-wrapper.sh ]]; then
     chmod +x "$INSTALL_DIR/miner-wrapper.sh"
 fi
 
+# 4b. Install `miner` shell function (system-wide profile.d) so SSH'ing in and
+# typing `miner` shows the running miner output, plus `miner start|stop|restart`
+# control. Sourced by both interactive and login bash. Idempotent.
+if [[ -f /tmp/mfarm-deploy/miner-attach.sh ]]; then
+    cp /tmp/mfarm-deploy/miner-attach.sh /etc/profile.d/miner-attach.sh
+    chmod 644 /etc/profile.d/miner-attach.sh
+    # Defensive: some bashrc setups skip /etc/profile.d when invoked as
+    # non-login shells. Source it from /root/.bashrc explicitly too.
+    if ! grep -q miner-attach /root/.bashrc 2>/dev/null; then
+        echo '. /etc/profile.d/miner-attach.sh' >> /root/.bashrc
+    fi
+fi
+
 # 5. Install systemd service
 echo "[4/8] Installing systemd service..."
 cp /tmp/mfarm-deploy/mfarm-agent.service /etc/systemd/system/mfarm-agent.service
