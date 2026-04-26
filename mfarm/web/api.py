@@ -321,10 +321,18 @@ async def apply_flightsheet(fs_name: str, target: str):
                 "coinbase_addr": fs.coinbase_addr,
             }
 
-            await loop.run_in_executor(
-                _executor,
-                lambda r=rig, c=json.dumps(config, indent=2): pool.upload_string(r, c, "/etc/mfarm/config.json")
-            )
+            config_json = json.dumps(config, indent=2)
+
+            def _upload_config(r=rig, c=config_json):
+                try:
+                    pool.upload_string(r, c, "/etc/mfarm/config.json")
+                except PermissionError:
+                    # Older MeowOS images shipped with chattr +i on
+                    # /etc/mfarm/config.json. Strip it and retry once.
+                    pool.exec(r, "sudo chattr -i /etc/mfarm/config.json 2>/dev/null || chattr -i /etc/mfarm/config.json", timeout=5)
+                    pool.upload_string(r, c, "/etc/mfarm/config.json")
+
+            await loop.run_in_executor(_executor, _upload_config)
             await loop.run_in_executor(
                 _executor,
                 lambda r=rig: pool.upload_string(r, "apply_config", "/var/run/mfarm/command")
