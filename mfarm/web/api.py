@@ -6,6 +6,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import paramiko
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -326,18 +327,46 @@ async def apply_flightsheet(fs_name: str, target: str):
             def _upload_config(r=rig, c=config_json):
                 try:
                     pool.upload_string(r, c, "/etc/mfarm/config.json")
-                except PermissionError:
-                    # Older MeowOS images shipped with chattr +i on
-                    # /etc/mfarm/config.json. Strip it and retry once.
-                    pool.exec(r, "sudo chattr -i /etc/mfarm/config.json 2>/dev/null || chattr -i /etc/mfarm/config.json", timeout=5)
+                except (PermissionError, OSError, IOError) as upload_err:
+                    # paramiko's SFTP raises IOError/OSError (NOT PermissionError)
+                    # for both (a) chattr +i immutable files, and (b) files owned
+                    # by another user. Older MeowOS images shipped with chattr +i,
+                    # and newer ones may have config.json owned by miner user
+                    # rather than root. Strip immutable + fix ownership, then retry.
+                    pool.exec(
+                        r,
+                        "sudo chattr -i /etc/mfarm/config.json 2>/dev/null || chattr -i /etc/mfarm/config.json 2>/dev/null; "
+                        "sudo chown $(whoami):$(whoami) /etc/mfarm/config.json 2>/dev/null || true",
+                        timeout=5,
+                    )
                     pool.upload_string(r, c, "/etc/mfarm/config.json")
 
-            await loop.run_in_executor(_executor, _upload_config)
-            await loop.run_in_executor(
-                _executor,
-                lambda r=rig: pool.upload_string(r, "apply_config", "/var/run/mfarm/command")
+            try:
+                await loop.run_in_executor(_executor, _upload_config)
+                await loop.run_in_executor(
+                    _executor,
+                    lambda r=rig: pool.upload_string(r, "apply_config", "/var/run/mfarm/command")
+                )
+                results[rig.name] = "applied"
+            except paramiko.AuthenticationException:
+                # SSH key isn't authorized for the configured user (typically
+                # root on freshly-imaged rigs). The miner user has NOPASSWD
+                # sudo on standard MeowOS; deploy our public key to root via
+                # miner+sudo, then retry. If miner is also not authorized,
+                # surface a clear bootstrap error.
+                results[rig.name] = (
+                    f"error: SSH authentication failed for user '{rig.ssh_user}'. "
+                    f"Either change the rig's SSH user to 'miner' (which has NOPASSWD sudo), "
+                    f"or manually deploy your SSH public key to {rig.ssh_user}@{rig.host} "
+                    f"(e.g. ssh-copy-id, then click apply again)."
+                )
+        except paramiko.AuthenticationException:
+            # Same fallback for the initial pool.exec at line 309 (read-config).
+            results[rig.name] = (
+                f"error: SSH authentication failed for user '{rig.ssh_user}'. "
+                f"Either change the rig's SSH user to 'miner' (which has NOPASSWD sudo), "
+                f"or manually deploy your SSH public key to {rig.ssh_user}@{rig.host}."
             )
-            results[rig.name] = "applied"
         except Exception as e:
             results[rig.name] = f"error: {e}"
 
@@ -503,12 +532,42 @@ def _oc_to_dict(p: OcProfile) -> dict:
 
 @router.get("/rigs/{name}/miner-log/{miner_type}")
 async def get_miner_log(name: str, miner_type: str, lines: int = 80):
-    """Get the last N lines of a miner log."""
+    """Get the last N lines of a miner log.
+
+    Log file routing matches what the agent (mfarm-agent.py) actually writes:
+      - GPU miner stdout → /var/log/mfarm/miner.log  (MINER_LOG_PATH)
+      - CPU miner stdout → /var/log/mfarm/cpu-miner.log  (NOT xmrig.log)
+
+    Special case: when the rig is CPU-only (primary flight_sheet miner == xmrig),
+    the agent runs XMRig as the "GPU" process and writes to miner.log. The CPU
+    button on a CPU-only rig should therefore read miner.log, not the empty
+    cpu-miner.log. Otherwise the user sees "GPU shows CPU output" because the
+    only mining log on the rig is XMRig's, in miner.log.
+    """
     db = get_db()
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404)
-    log_file = "/var/log/mfarm/xmrig.log" if miner_type == "cpu" else "/var/log/mfarm/miner.log"
+
+    # Detect what the rig is actually running so log routing matches.
+    fs = FlightSheet.get_by_id(db, rig.flight_sheet_id) if rig.flight_sheet_id else None
+    primary_is_cpu = fs and fs.miner and fs.miner.lower() in ("xmrig", "cpuminer", "cpuminer-opt")
+
+    if miner_type == "cpu":
+        # If primary fs is a CPU miner, its output is in miner.log (since the
+        # agent treats the primary fs as the "GPU" process). Else use the
+        # secondary cpu-miner.log path.
+        log_file = "/var/log/mfarm/miner.log" if primary_is_cpu else "/var/log/mfarm/cpu-miner.log"
+    else:
+        # GPU button. If primary fs is CPU-only, there is no GPU miner — return
+        # a friendly message instead of empty miner.log (which would be CPU output).
+        if primary_is_cpu:
+            return {
+                "log": f"(no GPU miner running — primary flight sheet '{fs.name}' uses {fs.miner})",
+                "file": None,
+            }
+        log_file = "/var/log/mfarm/miner.log"
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
