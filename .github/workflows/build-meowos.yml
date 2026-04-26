@@ -85,6 +85,8 @@ jobs:
 
           if [[ "${CHANNEL}" == "stable" ]]; then
             upload "install.sh" "install.sh" "text/plain"
+          else
+            upload "install-dev.sh" "install-dev.sh" "text/plain"
           fi
 
           SHA256=$(cut -d' ' -f1 SHA256SUMS.txt)
