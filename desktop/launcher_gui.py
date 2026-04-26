@@ -156,7 +156,8 @@ def main() -> int:
             "--window-size=1400,900",
             "--no-first-run",
             "--no-default-browser-check",
-        ]
+        ],
+        **_no_window_kwargs(),
     )
     # The launcher exe for Chromium browsers often exits immediately after
     # signaling an existing browser session, so we can't use proc.wait() to
@@ -209,8 +210,16 @@ def _sweep_old_profile_dirs(keep: str) -> None:
         pass
 
 
+def _no_window_kwargs() -> dict:
+    """subprocess kwargs that suppress the brief CMD window flash on Windows."""
+    if sys.platform != "win32":
+        return {}
+    # CREATE_NO_WINDOW = 0x08000000. Defined this way so the file imports
+    # cleanly on Linux (where subprocess.CREATE_NO_WINDOW does not exist).
+    return {"creationflags": 0x08000000}
+
+
 def _app_window_running(url_marker: str) -> bool:
-    browser_exes = "msedge.exe", "chrome.exe", "chromium.exe"
     if sys.platform == "win32":
         try:
             ps = (
@@ -222,6 +231,7 @@ def _app_window_running(url_marker: str) -> bool:
             out = subprocess.check_output(
                 ["powershell", "-NoProfile", "-Command", ps],
                 stderr=subprocess.DEVNULL, timeout=5,
+                **_no_window_kwargs(),
             ).decode("utf-8", errors="ignore").strip()
             return out.isdigit() and int(out) > 0
         except Exception:
