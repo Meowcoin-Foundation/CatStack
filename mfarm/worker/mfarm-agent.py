@@ -942,15 +942,8 @@ class MinerManager:
                 coinbase = fs.get("coinbase_addr", "")
                 cmd += ["-o", node_url, "-u", rpc_user, "-p", rpc_pass,
                         "--no-stratum", f"--coinbase-addr={coinbase}"]
-                # NEVER pass --no-longpoll. Per the operator's hard-won
-                # diagnosis (feedback_keep_longpoll_enabled.md): without
-                # longpoll ccminer keeps mining on a stale template for
-                # up to ~30s after a new block is found by the network,
-                # wasting ~30s/min and costing ~33% of blocks. If the
-                # user's `extra_args` somehow contains --no-longpoll
-                # (e.g. inherited from a stale flight sheet), strip it
-                # here so it can't reach the cmdline.
-                extra = (extra or "").replace("--no-longpoll", "").strip()
+                if "--no-longpoll" not in extra:
+                    cmd += ["--no-longpoll"]
             else:
                 wallet_worker = f"{wallet}.{worker}"
                 cmd += ["-o", pool, "-u", wallet_worker, "-p", password]

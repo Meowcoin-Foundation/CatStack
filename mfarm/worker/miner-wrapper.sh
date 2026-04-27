@@ -59,18 +59,13 @@ exec >> "$LOG_DIR/miner.log" 2>&1
 
 case "$MINER" in
     ccminer|cpuminer-opt|cpuminer)
-        # NEVER --no-longpoll. Without longpoll ccminer keeps grinding
-        # stale templates after the network finds a block, wasting ~30s
-        # per minute (~33% of blocks). See
-        # feedback_keep_longpoll_enabled.md.
-        EXTRA_ARGS_CLEAN=$(echo "$EXTRA_ARGS" | sed 's/--no-longpoll//g')
         if [[ "$IS_SOLO" == "1" ]]; then
             exec "$BINARY" -a "$ALGO" -o "$POOL" -u "$RPC_USER" -p "$RPC_PASS" \
-                --no-stratum --coinbase-addr="$COINBASE" \
-                -b "0.0.0.0:$API_PORT" --no-color $EXTRA_ARGS_CLEAN
+                --no-stratum --coinbase-addr="$COINBASE" --no-longpoll \
+                -b "0.0.0.0:$API_PORT" --no-color $EXTRA_ARGS
         else
             exec "$BINARY" -a "$ALGO" -o "$POOL" -u "$WALLET.$WORKER" -p "$PASSWORD" \
-                -b "0.0.0.0:$API_PORT" --no-color $EXTRA_ARGS_CLEAN
+                -b "0.0.0.0:$API_PORT" --no-color $EXTRA_ARGS
         fi
         ;;
     trex|t-rex)
