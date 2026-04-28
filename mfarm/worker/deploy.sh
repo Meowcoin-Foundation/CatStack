@@ -59,7 +59,7 @@ if [[ ! -f "$CONFIG_DIR/config.json" ]]; then
 {
     "agent": {
         "version": "0.1.0",
-        "stats_interval": 5,
+        "stats_interval": 2,
         "watchdog_interval": 30,
         "max_gpu_temp": 90,
         "critical_gpu_temp": 95,

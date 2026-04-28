@@ -62,7 +62,7 @@ log = logging.getLogger("catstack-agent")
 
 class Config:
     def __init__(self):
-        self.stats_interval = 5
+        self.stats_interval = 2
         self.watchdog_interval = 30
         self.max_gpu_temp = 90
         self.critical_gpu_temp = 95

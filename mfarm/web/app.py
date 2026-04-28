@@ -76,7 +76,7 @@ async def poll_all_rigs():
         except Exception as e:
             log.error("Poll error: %s", e)
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
 
 
 def _poll_one(pool, rig: Rig) -> dict | None:
