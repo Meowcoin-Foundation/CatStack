@@ -1167,8 +1167,17 @@ class MinerManager:
                 except Exception as e:
                     log.error("Failed to start GPU miner: %s", e)
 
-        # Start CPU miner (dual mining)
+        # Start CPU miner (dual mining). Skip if the primary flight sheet is
+        # itself a CPU-only miner — running two CPU miners on the same cores
+        # halves both their hashrates (mini02 hit this: XTM xmrig + stale
+        # xmrig-kryptex cpu_fs both spawned, total ~2 kH/s instead of 19 kH/s).
         cpu_fs = self.config.cpu_flight_sheet
+        primary_miner = (fs or {}).get("miner", "") if fs else ""
+        primary_is_cpu = primary_miner in self.CPU_MINER_BINARIES
+        if cpu_fs and primary_is_cpu:
+            log.info("Skipping CPU miner from cpu_flight_sheet — primary "
+                     "miner '%s' is already CPU-only", primary_miner)
+            cpu_fs = None
         if cpu_fs and not self.is_cpu_running():
             cpu_miner = cpu_fs.get("miner", "")
             cpu_algo = cpu_fs.get("algo", "")
@@ -1376,7 +1385,15 @@ class Agent:
             self.miner.start()
         elif cmd == "apply_config":
             self.config.load()
+            # Hard kill any miner process before launching new ones — covers
+            # foreign PIDs the agent doesn't own (orphans from a prior run, a
+            # systemd-launched xmrig, a manually started ccminer, etc.).
+            # stop() only signals self.process / self.cpu_process; without
+            # this scan, stale miners survive an apply and contend with the
+            # new launch (AI-02 was hitting this — duplicate xmrigs, 4 kH/s
+            # instead of 84 kH/s).
             self.miner.stop()
+            self.miner._kill_stale_miners(keep_cpu=False)
             time.sleep(2)
             if self.config.flight_sheet or self.config.cpu_flight_sheet:
                 self.miner.start()
