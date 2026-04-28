@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
@@ -172,9 +173,16 @@ async def exec_on_rig(name: str, body: dict):
         raise HTTPException(400, "No command provided")
     pool = get_pool()
     loop = asyncio.get_event_loop()
+    # Wrap in `bash -lc` so /etc/profile and /etc/profile.d/* are sourced.
+    # paramiko's exec_command runs as a non-interactive non-login shell, which
+    # skips both /etc/profile and ~/.bashrc — so functions defined in
+    # /etc/profile.d/miner-attach.sh (e.g. `miner start|stop|restart`) aren't
+    # in scope. -l forces login shell so the typed command sees the same
+    # environment a real `ssh user@host` interactive session would.
+    wrapped = f"bash -lc {shlex.quote(command)}"
     try:
         stdout, stderr, rc = await loop.run_in_executor(
-            _executor, lambda: pool.exec(rig, command, timeout=30)
+            _executor, lambda: pool.exec(rig, wrapped, timeout=30)
         )
         return {"stdout": stdout, "stderr": stderr, "exit_code": rc}
     except Exception as e:
@@ -496,6 +504,39 @@ def create_flightsheet(data: FlightSheetCreate):
     )
     fs.save(db)
     return _fs_to_dict(FlightSheet.get_by_name(db, data.name))
+
+
+class FlightSheetUpdate(BaseModel):
+    coin: str | None = None
+    algo: str | None = None
+    miner: str | None = None
+    pool_url: str | None = None
+    pool_url2: str | None = None
+    wallet: str | None = None
+    worker_template: str | None = None
+    password: str | None = None
+    extra_args: str | None = None
+    is_solo: bool | None = None
+    solo_rpc_user: str | None = None
+    solo_rpc_pass: str | None = None
+    coinbase_addr: str | None = None
+
+
+@router.put("/flightsheets/{name}")
+def update_flightsheet(name: str, data: FlightSheetUpdate):
+    db = get_db()
+    fs = FlightSheet.get_by_name(db, name)
+    if not fs:
+        raise HTTPException(404, f"Flight sheet '{name}' not found")
+    updates = data.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if field == "is_solo":
+            value = 1 if value else 0
+        elif field == "coin" and value is not None:
+            value = value.upper()
+        setattr(fs, field, value)
+    fs.save(db)
+    return _fs_to_dict(FlightSheet.get_by_name(db, name))
 
 
 @router.delete("/flightsheets/{name}")
@@ -902,43 +943,13 @@ async def phonehome(body: dict):
 
 @router.get("/discovered")
 def get_discovered():
-    """List rigs that have phoned home but aren't claimed by an existing DB
-    entry or user-dismissed.
+    """List rigs that have phoned home but aren't claimed or user-dismissed.
 
-    A discovered rig is suppressed when ANY of these match an existing rig:
-      1. MAC is in the persistent _dismissed_macs set (manual dismiss, or
-         auto-dismissed because of IP/hostname match below).
-      2. Phoned-home IP equals rig.host.
-      3. Phoned-home hostname equals rig.name (case-insensitive).
-
-    Cases 2 and 3 also auto-promote the MAC into _dismissed_macs so the rig
-    stays suppressed if its IP later changes (DHCP renew) or its hostname
-    drifts. Without this, the popup re-fires every poll for already-claimed
-    rigs whose IP changed.
+    Filter logic (skip dismissed MAC, auto-dismiss IP/hostname match) lives
+    in app._filtered_discovered() so the WS push uses the same rules.
     """
-    from mfarm.web.app import _discovered_rigs, _dismissed_macs, _save_dismissed_macs
-    import time
-    db = get_db()
-    rigs = Rig.get_all(db)
-    existing_hosts = {r.host for r in rigs}
-    existing_names = {r.name.lower() for r in rigs if r.name}
-    result = []
-    newly_dismissed = False
-    for mac, info in _discovered_rigs.items():
-        if mac in _dismissed_macs:
-            continue
-        ip = info.get("ip", "")
-        hostname = (info.get("hostname") or "").lower()
-        if ip in existing_hosts or (hostname and hostname in existing_names):
-            _dismissed_macs.add(mac)
-            newly_dismissed = True
-            continue
-        info_copy = dict(info)
-        info_copy["age_secs"] = round(time.time() - info.get("last_seen", 0))
-        result.append(info_copy)
-    if newly_dismissed:
-        _save_dismissed_macs(_dismissed_macs)
-    return result
+    from mfarm.web.app import _filtered_discovered
+    return _filtered_discovered()
 
 
 @router.post("/discovered/{mac}/dismiss")
@@ -1136,9 +1147,12 @@ def _bulk_actions(rig: Rig, pool, loop, command: str | None) -> dict:
     async def exec_cmd():
         if not command:
             return "error: no command provided"
+        # Same login-shell wrap as /api/rigs/{name}/exec — see that endpoint
+        # for why (lets profile.d-defined functions like `miner` resolve).
+        wrapped = f"bash -lc {shlex.quote(command)}"
         try:
             stdout, stderr, rc = await loop.run_in_executor(
-                _executor, lambda: pool.exec(rig, command, timeout=60),
+                _executor, lambda: pool.exec(rig, wrapped, timeout=60),
             )
             # Trim long output so the UI summary stays readable. Full output
             # is still returned in the per-rig result for debugging.

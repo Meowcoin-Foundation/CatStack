@@ -162,6 +162,37 @@ async def udp_listener():
             await asyncio.sleep(1)
 
 
+def _filtered_discovered() -> list[dict]:
+    """Return discovered rigs excluding dismissed-MAC and already-claimed rigs.
+
+    Mirrors the filter in /api/discovered: skip dismissed MACs, auto-dismiss
+    (and persist) any MAC whose IP/hostname matches an existing rig. Used by
+    both /api/discovered and the WS push so a phone-home from a claimed rig
+    can never re-render in the discovery popup.
+    """
+    db = get_db()
+    rigs = Rig.get_all(db)
+    existing_hosts = {r.host for r in rigs}
+    existing_names = {r.name.lower() for r in rigs if r.name}
+    result = []
+    newly_dismissed = False
+    for mac, info in _discovered_rigs.items():
+        if mac in _dismissed_macs:
+            continue
+        ip = info.get("ip", "")
+        hostname = (info.get("hostname") or "").lower()
+        if ip in existing_hosts or (hostname and hostname in existing_names):
+            _dismissed_macs.add(mac)
+            newly_dismissed = True
+            continue
+        info_copy = dict(info)
+        info_copy["age_secs"] = round(time.time() - info.get("last_seen", 0))
+        result.append(info_copy)
+    if newly_dismissed:
+        _save_dismissed_macs(_dismissed_macs)
+    return result
+
+
 def _handle_phonehome(msg: dict):
     """Process a phone-home message from a rig."""
     hostname = msg.get("hostname", "unknown")
@@ -178,10 +209,10 @@ def _handle_phonehome(msg: dict):
             }
             log.info("Phone-home: %s (%s) at %s", hostname, mac, ip)
 
-    # Push discovery update to WebSocket clients
+    # Push discovery update to WebSocket clients (filtered)
     payload = json.dumps({
         "type": "discovery",
-        "rigs": list(_discovered_rigs.values()),
+        "rigs": _filtered_discovered(),
     })
     for ws in list(_ws_clients):
         try:
