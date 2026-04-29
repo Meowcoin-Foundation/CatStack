@@ -709,6 +709,19 @@ async function openRig(name) {
     <div class="card-row"><span class="label">RAM</span><span class="value">${sys.mem_used_mb && sys.mem_total_mb ? `${sys.mem_used_mb}/${sys.mem_total_mb} MB` : '-'}</span></div>
   </div>`;
 
+  // Flight Sheet picker — change which flight sheet this rig runs.
+  // Dropdown is populated async by populateFlightSheetSelect() once the modal renders.
+  html += `<div class="detail-section">
+    <h3>Flight Sheet</h3>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="fs-select-${name}" style="flex:1;min-width:220px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+        <option value="">Loading...</option>
+      </select>
+      <button class="btn success" onclick="applyFlightSheetToRig('${name}')">Apply</button>
+    </div>
+    <div id="fs-result-${name}" style="margin-top:10px;font-size:13px"></div>
+  </div>`;
+
   // External chassis fans (Octominer only)
   const chassis = sys.chassis || {};
   if (chassis.is_octominer) {
@@ -860,6 +873,50 @@ async function openRig(name) {
   // Load hashrate history chart + current OC values
   loadHashrateChart(name);
   populateOcCard(name);
+  populateFlightSheetSelect(name);
+}
+
+async function populateFlightSheetSelect(rigName) {
+  const sel = document.getElementById(`fs-select-${rigName}`);
+  if (!sel) return;
+  try {
+    const res = await fetch('/api/flightsheets');
+    const sheets = await res.json();
+    if (!sheets.length) {
+      sel.innerHTML = '<option value="">(no flight sheets — create one in the Flight Sheets tab)</option>';
+      return;
+    }
+    const current = (rigData[rigName] || {}).flight_sheet || '';
+    sel.innerHTML = sheets.map(fs =>
+      `<option value="${fs.name}"${fs.name === current ? ' selected' : ''}>${fs.name} — ${fs.coin} (${fs.miner})</option>`
+    ).join('');
+  } catch (e) {
+    sel.innerHTML = `<option value="">Error loading flight sheets: ${e.message}</option>`;
+  }
+}
+
+async function applyFlightSheetToRig(rigName) {
+  const sel = document.getElementById(`fs-select-${rigName}`);
+  const result = document.getElementById(`fs-result-${rigName}`);
+  if (!sel || !sel.value) {
+    if (result) result.innerHTML = '<span style="color:var(--red)">Select a flight sheet first</span>';
+    return;
+  }
+  const fsName = sel.value;
+  if (result) result.innerHTML = '<span style="color:var(--text-muted)">Applying...</span>';
+  try {
+    const res = await fetch(`/api/flightsheets/${fsName}/apply/${rigName}`, { method: 'POST' });
+    const data = await res.json();
+    const status = (data.results || {})[rigName] || 'no result';
+    const ok = typeof status === 'string' && !status.startsWith('error');
+    if (result) result.innerHTML = `<span style="color:var(--${ok ? 'green' : 'red'})">${ok ? '&#10003; ' : ''}${status}</span>`;
+    if (ok) {
+      if (typeof toast === 'function') toast(`Flight sheet "${fsName}" applied to ${rigName}`);
+      if (rigData[rigName]) rigData[rigName].flight_sheet = fsName;
+    }
+  } catch (e) {
+    if (result) result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
 }
 
 // ── Inline OC card handlers ──
