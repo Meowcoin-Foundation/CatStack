@@ -325,6 +325,14 @@ def _reconcile_rig_host_from_phonehome(msg: dict) -> None:
             with pool._lock:
                 for name in host_changed_names:
                     pool._clients.pop(name, None)
+            # Re-apply router rules so the port forward points at the new IP.
+            # Best-effort; backend.apply_rule is idempotent.
+            try:
+                from mfarm.web.api import _hook_router_apply
+                for name in host_changed_names:
+                    _hook_router_apply(name)
+            except Exception as e:
+                log.warning("router reapply on host change failed: %s", e)
     except Exception as e:
         log.warning("rig-host reconcile failed: %s", e)
 

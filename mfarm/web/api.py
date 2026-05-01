@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -13,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 import paramiko
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 from mfarm.db.connection import get_db
 from mfarm.db.models import Rig, FlightSheet, OcProfile, Group
@@ -68,6 +71,7 @@ def create_rig(data: RigCreate):
               ssh_user=data.ssh_user, ssh_key_path=data.ssh_key_path,
               group_id=group_id, notes=data.notes)
     rig.save(db)
+    _hook_router_apply(rig.name)
 
     # Auto-dismiss any discovered rig whose IP matches what we just added.
     # The dismissed-macs set otherwise gets populated by the next /discovered
@@ -117,6 +121,8 @@ def update_rig(name: str, data: RigUpdate):
     if data.notes is not None:
         rig.notes = data.notes
     rig.save(db)
+    if data.host is not None or data.name is not None:
+        _hook_router_apply(rig.name)
     return _rig_to_dict(rig)
 
 
@@ -127,7 +133,51 @@ def delete_rig(name: str):
     if not rig:
         raise HTTPException(404, f"Rig '{name}' not found")
     rig.delete(db)
+    _hook_router_remove(name)
     return {"status": "deleted"}
+
+
+def _hook_router_apply(rig_name: str) -> None:
+    """Fire-and-forget: apply current backend's port-forward rule for rig.
+
+    Runs in the existing thread pool so the synchronous rig CRUD handlers
+    return immediately. If the rig isn't a Vast host (no port range) we
+    proactively remove any stale rule under that name."""
+    def _do():
+        try:
+            from mfarm.router.base import ForwardRule
+            from mfarm.router.store import current_backend
+            db = get_db()
+            rig = Rig.get_by_name(db, rig_name)
+            if not rig:
+                return
+            backend = current_backend(db)
+            rng = _read_rig_port_range(rig)
+            if rng is None:
+                backend.remove_rule(rig_name)
+                return
+            rule = ForwardRule(
+                rig_name=rig_name, internal_ip=rig.host,
+                port_lo=rng[0], port_hi=rng[1],
+            )
+            res = backend.apply_rule(rule)
+            if not res.ok:
+                log.warning("router apply for %s: %s", rig_name, "; ".join(res.messages))
+        except Exception as e:
+            log.warning("router hook apply failed for %s: %s", rig_name, e)
+    _executor.submit(_do)
+
+
+def _hook_router_remove(rig_name: str) -> None:
+    def _do():
+        try:
+            from mfarm.router.store import current_backend
+            db = get_db()
+            backend = current_backend(db)
+            backend.remove_rule(rig_name)
+        except Exception as e:
+            log.warning("router hook remove failed for %s: %s", rig_name, e)
+    _executor.submit(_do)
 
 
 @router.get("/rigs/{name}/stats")
@@ -1482,3 +1532,157 @@ def get_agent_bundle():
         media_type="application/gzip",
         headers={"X-Agent-Version": _agent_version()},
     )
+
+
+# ── Router integration ──────────────────────────────────────────────
+# Pluggable backends create port-forward rules on the operator's router so
+# Vast hosts get verified without manual UniFi/router clicks per rig. See
+# mfarm/router/ for the abstraction; UnifiBackend is the only real
+# implementation today (manual is a no-op fallback).
+
+class RouterConfigUpdate(BaseModel):
+    backend: str
+    config: dict
+
+
+def _read_rig_port_range(rig: Rig) -> tuple[int, int] | None:
+    """Read /var/lib/vastai_kaalia/host_port_range from the rig over SSH.
+    Returns None when the rig isn't a Vast host (no file) or unreachable.
+
+    File format varies: some Vast versions write '40000 40200', others
+    write '40000-40200'. Tolerate both."""
+    try:
+        pool = get_pool()
+        out, _, rc = pool.exec(rig, "cat /var/lib/vastai_kaalia/host_port_range 2>/dev/null", timeout=5)
+        if rc != 0 or not out.strip():
+            return None
+        parts = re.split(r'[-\s]+', out.strip())
+        if len(parts) != 2:
+            return None
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
+
+
+def _redact_config(config: dict) -> dict:
+    """Strip secret-looking fields before returning to the client."""
+    safe = dict(config)
+    for k in ("password", "token", "api_key", "secret"):
+        if k in safe and safe[k]:
+            safe[k] = "********"
+    return safe
+
+
+@router.get("/router/config")
+def get_router_config():
+    """Return the active backend name + config with secrets redacted."""
+    from mfarm.router.store import load_config
+    db = get_db()
+    backend, config = load_config(db)
+    return {
+        "backend": backend,
+        "config": _redact_config(config),
+        "available_backends": list(__import__("mfarm.router", fromlist=["BACKENDS"]).BACKENDS.keys()),
+    }
+
+
+@router.put("/router/config")
+def put_router_config(body: RouterConfigUpdate):
+    """Save backend name + config. Validates before persisting; returns 400
+    if config is missing required fields for the chosen backend."""
+    from mfarm.router import BACKENDS
+    from mfarm.router.base import ConfigError
+    from mfarm.router.store import load_config, save_config
+    if body.backend not in BACKENDS:
+        raise HTTPException(400, f"unknown backend: {body.backend}. Valid: {list(BACKENDS)}")
+    db = get_db()
+    # If caller passed back redacted "********" for a secret, restore the
+    # stored value — typical PUT-after-GET roundtrip from a settings UI.
+    existing_backend, existing_config = load_config(db)
+    merged = dict(body.config)
+    if existing_backend == body.backend:
+        for k in ("password", "token", "api_key", "secret"):
+            if merged.get(k) == "********" and existing_config.get(k):
+                merged[k] = existing_config[k]
+    try:
+        save_config(db, body.backend, merged)
+    except ConfigError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "saved", "backend": body.backend}
+
+
+@router.post("/router/test")
+def test_router_connection():
+    """Probe the configured backend (e.g. UniFi login + list rules).
+    Returns ApplyResult-style {ok, messages}."""
+    from mfarm.router.store import current_backend
+    db = get_db()
+    backend = current_backend(db)
+    res = backend.test_connection()
+    return {"ok": res.ok, "messages": res.messages}
+
+
+@router.post("/router/sync")
+async def sync_router_rules():
+    """Apply port-forward rules for every claimed rig that has a Vast port
+    range. Idempotent — safe to re-run. Returns per-rig ApplyResult."""
+    from mfarm.router.base import ForwardRule
+    from mfarm.router.store import current_backend
+    db = get_db()
+    backend = current_backend(db)
+    rigs = Rig.get_all(db)
+    loop = asyncio.get_event_loop()
+    results: dict[str, dict] = {}
+    for rig in rigs:
+        rng = await loop.run_in_executor(_executor, lambda r=rig: _read_rig_port_range(r))
+        if rng is None:
+            results[rig.name] = {"ok": True, "messages": ["skipped: no Vast port range (not a Vast host or unreachable)"]}
+            continue
+        rule = ForwardRule(
+            rig_name=rig.name,
+            internal_ip=rig.host,
+            port_lo=rng[0],
+            port_hi=rng[1],
+        )
+        res = await loop.run_in_executor(_executor, lambda b=backend, r=rule: b.apply_rule(r))
+        results[rig.name] = {"ok": res.ok, "messages": res.messages}
+    return {"results": results}
+
+
+@router.post("/router/sync/{rig_name}")
+async def sync_router_rule(rig_name: str):
+    """Apply (or remove if no port range) the rule for one rig. Used as a
+    hook from rig add/update flows."""
+    from mfarm.router.base import ForwardRule
+    from mfarm.router.store import current_backend
+    db = get_db()
+    rig = Rig.get_by_name(db, rig_name)
+    if not rig:
+        raise HTTPException(404, f"rig {rig_name} not found")
+    backend = current_backend(db)
+    loop = asyncio.get_event_loop()
+    rng = await loop.run_in_executor(_executor, lambda: _read_rig_port_range(rig))
+    if rng is None:
+        # No Vast on this rig — make sure no stale rule is left
+        res = await loop.run_in_executor(_executor, lambda: backend.remove_rule(rig_name))
+        return {"ok": res.ok, "messages": res.messages, "action": "removed (no vast)"}
+    rule = ForwardRule(
+        rig_name=rig.name,
+        internal_ip=rig.host,
+        port_lo=rng[0],
+        port_hi=rng[1],
+    )
+    res = await loop.run_in_executor(_executor, lambda: backend.apply_rule(rule))
+    return {"ok": res.ok, "messages": res.messages, "action": "applied"}
+
+
+@router.delete("/router/rules/{rig_name}")
+async def remove_router_rule(rig_name: str):
+    """Manually remove a rig's rule. Called automatically when a rig is
+    deleted (see rig DELETE handler)."""
+    from mfarm.router.store import current_backend
+    db = get_db()
+    backend = current_backend(db)
+    loop = asyncio.get_event_loop()
+    res = await loop.run_in_executor(_executor, lambda: backend.remove_rule(rig_name))
+    return {"ok": res.ok, "messages": res.messages}

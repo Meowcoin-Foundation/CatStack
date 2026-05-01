@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_rig_time ON events(rig_id, timestamp);
+
+-- Router-integration config. Single row (id=1). `config` is a JSON blob
+-- keyed by the backend (url/username/password for unifi, etc.). Plaintext
+-- because the DB lives on the operator's local console; file perms protect
+-- it.
+CREATE TABLE IF NOT EXISTS router_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    backend     TEXT NOT NULL DEFAULT 'manual',
+    config      TEXT NOT NULL DEFAULT '{}',
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO router_config (id, backend, config) VALUES (1, 'manual', '{}');
 """
 
 
