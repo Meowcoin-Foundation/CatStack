@@ -12,6 +12,10 @@ SOURCE_DIR="/mnt/c/Source/mfarm/build-usb"
 OUTPUT_ISO="/mnt/c/Source/mfarm/build-usb/mfarm-installer.iso"
 UBUNTU_ISO_URL="https://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso"
 UBUNTU_ISO="$BUILD_DIR/ubuntu-server.iso"
+MEMTEST_VER="7.20"
+MEMTEST_URL="https://memtest.org/download/v${MEMTEST_VER}/mt86plus_${MEMTEST_VER}.binaries.zip"
+MEMTEST_ZIP="$BUILD_DIR/memtest86plus.zip"
+MEMTEST_DIR="$BUILD_DIR/memtest"
 
 echo "============================================"
 echo "  MFarm USB Installer Builder"
@@ -22,7 +26,7 @@ echo ""
 
 echo "[1/6] Installing build tools..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq xorriso p7zip-full wget
+sudo apt-get install -y -qq xorriso p7zip-full wget unzip
 
 # ── 2. Download Ubuntu Server ISO ────────────────────────────────────
 
@@ -35,6 +39,19 @@ else
     echo "[2/6] Downloading Ubuntu Server 22.04.5 (~2GB)..."
     wget -q --show-progress -O "$UBUNTU_ISO" "$UBUNTU_ISO_URL"
 fi
+
+# ── 2b. Download Memtest86+ binaries ─────────────────────────────────
+
+if [[ -f "$MEMTEST_ZIP" ]]; then
+    echo "      Memtest86+ already downloaded, reusing..."
+else
+    echo "      Downloading Memtest86+ ${MEMTEST_VER}..."
+    wget -q -O "$MEMTEST_ZIP" "$MEMTEST_URL"
+fi
+
+rm -rf "$MEMTEST_DIR"
+mkdir -p "$MEMTEST_DIR"
+unzip -q -o "$MEMTEST_ZIP" -d "$MEMTEST_DIR"
 
 # ── 3. Extract ISO contents ─────────────────────────────────────────
 
@@ -61,6 +78,11 @@ cp "$SOURCE_DIR/autoinstall/meta-data" "$BUILD_DIR/iso/autoinstall/meta-data"
 mkdir -p "$BUILD_DIR/iso/mfarm-files"
 cp "$SOURCE_DIR/mfarm-files/"* "$BUILD_DIR/iso/mfarm-files/"
 
+# Add Memtest86+ binaries (BIOS .bin + UEFI .efi)
+mkdir -p "$BUILD_DIR/iso/boot/memtest"
+cp "$MEMTEST_DIR/memtest64.bin" "$BUILD_DIR/iso/boot/memtest/memtest.bin"
+cp "$MEMTEST_DIR/memtest64.efi" "$BUILD_DIR/iso/boot/memtest/memtest.efi"
+
 # Modify GRUB config to enable autoinstall
 # The key is adding 'autoinstall' to the kernel command line
 # and pointing to our cloud-init datasource
@@ -73,8 +95,20 @@ if [[ -f "$GRUB_CFG" ]]; then
     sed -i 's|linux\t/casper/vmlinuz  ---|linux\t/casper/vmlinuz autoinstall ds=nocloud\\;s=/cdrom/autoinstall/ ---|' "$GRUB_CFG"
 
     # Also set a short timeout so it boots automatically
-    sed -i 's/set timeout=30/set timeout=5/' "$GRUB_CFG"
-    sed -i 's/set timeout=-1/set timeout=5/' "$GRUB_CFG"
+    sed -i 's/set timeout=30/set timeout=10/' "$GRUB_CFG"
+    sed -i 's/set timeout=-1/set timeout=10/' "$GRUB_CFG"
+
+    # Append Memtest86+ menuentry (works for both BIOS and UEFI)
+    cat >> "$GRUB_CFG" <<'GRUB_MEMTEST'
+
+menuentry "Memtest86+ (RAM diagnostic)" {
+    if [ "${grub_platform}" = "efi" ]; then
+        chainloader /boot/memtest/memtest.efi
+    else
+        linux16 /boot/memtest/memtest.bin
+    fi
+}
+GRUB_MEMTEST
 fi
 
 # Also modify the BIOS/legacy boot config (isolinux/syslinux)
