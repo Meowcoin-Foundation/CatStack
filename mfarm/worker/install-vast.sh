@@ -357,6 +357,27 @@ if [[ -f /etc/systemd/system/vast_metrics.service ]] && \
     echo "  patched vast_metrics.service with ExecStartPre chmod"
 fi
 
+# Vast's launch_kaalia.sh hardcodes `skip_bwtest=1` which prevents the daemon
+# from running its bandwidth + speedtest cycle. Without those measurements,
+# Vast's verification queue can never approve the machine for listing — it
+# stays "unverified" forever and never earns. Drop a systemd override that
+# strips the flag on every vastai start, so it survives Vast auto-updates
+# (which would otherwise restore the flag in launch_kaalia.sh).
+mkdir -p /etc/systemd/system/vastai.service.d
+cat > /etc/systemd/system/vastai.service.d/no-skip-bwtest.conf <<'NSB'
+[Service]
+# Strip skip_bwtest=1 from Vast's launch script before each daemon start.
+# Vast auto-update overwrites launch_kaalia.sh periodically; this guarantees
+# the flag is gone every time the service comes up.
+ExecStartPre=/bin/sed -i 's/ skip_bwtest=1//g' /var/lib/vastai_kaalia/latest/launch_kaalia.sh
+NSB
+systemctl daemon-reload
+# Apply the edit immediately too (before first restart) and restart vastai
+# so the daemon picks up no-skip-bwtest on this run.
+sed -i 's/ skip_bwtest=1//g' /var/lib/vastai_kaalia/latest/launch_kaalia.sh 2>/dev/null || true
+systemctl restart vastai 2>/dev/null || true
+echo "  installed vastai drop-in to disable skip_bwtest (enables verification self-test)"
+
 # Push fresh machine_info so the Vast portal updates within ~30s instead of
 # waiting for the next cron-scheduled push (which can be ~1h away).
 sudo -u vastai_kaalia bash -c 'cd /var/lib/vastai_kaalia && python3 send_mach_info.py' 2>&1 \
