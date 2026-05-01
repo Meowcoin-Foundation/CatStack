@@ -72,6 +72,7 @@ def create_rig(data: RigCreate):
               group_id=group_id, notes=data.notes)
     rig.save(db)
     _hook_router_apply(rig.name)
+    _hook_rig_hostname_sync(rig.name)
 
     # Auto-dismiss any discovered rig whose IP matches what we just added.
     # The dismissed-macs set otherwise gets populated by the next /discovered
@@ -123,6 +124,8 @@ def update_rig(name: str, data: RigUpdate):
     rig.save(db)
     if data.host is not None or data.name is not None:
         _hook_router_apply(rig.name)
+    if data.name is not None:
+        _hook_rig_hostname_sync(rig.name)
     return _rig_to_dict(rig)
 
 
@@ -177,6 +180,54 @@ def _hook_router_remove(rig_name: str) -> None:
             backend.remove_rule(rig_name)
         except Exception as e:
             log.warning("router hook remove failed for %s: %s", rig_name, e)
+    _executor.submit(_do)
+
+
+# Valid hostname pattern per RFC 1123: alphanumeric + hyphens, doesn't start
+# with hyphen, max 63 chars. Rig names with underscores or spaces (e.g.
+# "Octo_Top") get skipped — Linux accepts them but they break DNS / Vast
+# portal display.
+_HOSTNAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$')
+
+
+def _hook_rig_hostname_sync(rig_name: str) -> None:
+    """Fire-and-forget: rename the rig's system hostname to match its
+    CatStack name. Restarts vastai/vast_metrics on Vast hosts so the Vast
+    portal picks up the new name on its next push.
+
+    No-op when the rig name isn't a valid RFC 1123 hostname (e.g. contains
+    underscores or spaces) — Linux would accept it but it's a bad idea."""
+    if not _HOSTNAME_RE.match(rig_name):
+        log.info("hostname sync skipped for %s: not a valid hostname", rig_name)
+        return
+
+    def _do():
+        try:
+            db = get_db()
+            rig = Rig.get_by_name(db, rig_name)
+            if not rig:
+                return
+            pool = get_pool()
+            # Quote-safe: rig_name has already passed _HOSTNAME_RE.
+            cmd = (
+                f"current=$(hostname); "
+                f"if [ \"$current\" != '{rig_name}' ]; then "
+                f"  hostnamectl set-hostname '{rig_name}' && "
+                f"  sed -i 's/^127\\.0\\.1\\.1.*/127.0.1.1\\t{rig_name}/' /etc/hosts; "
+                f"  grep -q '^127\\.0\\.1\\.1' /etc/hosts || echo -e '127.0.1.1\\t{rig_name}' >> /etc/hosts; "
+                f"  if systemctl is-active --quiet vastai 2>/dev/null; then "
+                f"    systemctl restart vastai vast_metrics 2>/dev/null || true; "
+                f"  fi; "
+                f"  echo \"renamed: $current -> {rig_name}\"; "
+                f"else "
+                f"  echo \"already {rig_name}\"; "
+                f"fi"
+            )
+            out, _, rc = pool.exec(rig, cmd, timeout=20)
+            if rc == 0 and "renamed:" in out:
+                log.info("hostname sync %s: %s", rig_name, out.strip())
+        except Exception as e:
+            log.warning("hostname sync failed for %s: %s", rig_name, e)
     _executor.submit(_do)
 
 
