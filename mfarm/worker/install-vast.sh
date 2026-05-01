@@ -276,6 +276,7 @@ while (( $(date +%s) < DEADLINE )); do
     fi
 done
 
+RECOVERY_OK=0
 if grep -q 'Install failed' "$LOG"; then
     echo
     echo "INSTALL FAILED. Tail of log:"
@@ -309,6 +310,7 @@ if grep -q 'Install failed' "$LOG"; then
                 sleep 5
                 if systemctl is-active --quiet vastai; then
                     echo "  vastai service active — recovery succeeded, continuing to step 10"
+                    RECOVERY_OK=1
                     # fall through to post-install hardening below
                 else
                     echo "  vastai still inactive after recovery"
@@ -331,7 +333,10 @@ if grep -q 'Install failed' "$LOG"; then
         exit 2
     fi
 fi
-if ! grep -q 'Daemon Running' "$LOG"; then
+# Skip the 'Daemon Running' check when our recovery path succeeded —
+# /var/log/vast-install.log won't have that string because we side-stepped
+# Vast's normal happy path. systemctl is-active is the actual success signal.
+if [[ "$RECOVERY_OK" == "0" ]] && ! grep -q 'Daemon Running' "$LOG"; then
     echo "INSTALL TIMED OUT after 20 min without 'Daemon Running'. Last log lines:"
     tail -10 "$LOG"
     exit 3
