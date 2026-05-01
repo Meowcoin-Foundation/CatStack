@@ -140,6 +140,37 @@ def delete_rig(name: str):
     return {"status": "deleted"}
 
 
+@router.post("/rigs/{name}/sync-hostname")
+async def sync_rig_hostname(name: str):
+    """On-demand hostname sync — useful for rigs claimed before the
+    auto-sync hook existed. Synchronous; returns the result."""
+    db = get_db()
+    if not Rig.get_by_name(db, name):
+        raise HTTPException(404, f"rig '{name}' not found")
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, lambda: _apply_rig_hostname(name))
+
+
+@router.post("/rigs/sync-hostnames")
+async def sync_all_hostnames():
+    """Bulk hostname sync across the fleet. Returns per-rig result.
+    Skips invalid names (with underscores etc.) silently with action='skipped'."""
+    db = get_db()
+    rigs = Rig.get_all(db)
+    loop = asyncio.get_event_loop()
+    futures = [
+        (r.name, loop.run_in_executor(_executor, lambda n=r.name: _apply_rig_hostname(n)))
+        for r in rigs
+    ]
+    results = {}
+    for name, fut in futures:
+        try:
+            results[name] = await asyncio.wait_for(fut, timeout=30)
+        except Exception as e:
+            results[name] = {"ok": False, "action": "error", "message": f"timeout/error: {e}"}
+    return {"results": results}
+
+
 def _hook_router_apply(rig_name: str) -> None:
     """Fire-and-forget: apply current backend's port-forward rule for rig.
 
@@ -190,44 +221,56 @@ def _hook_router_remove(rig_name: str) -> None:
 _HOSTNAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$')
 
 
-def _hook_rig_hostname_sync(rig_name: str) -> None:
-    """Fire-and-forget: rename the rig's system hostname to match its
-    CatStack name. Restarts vastai/vast_metrics on Vast hosts so the Vast
-    portal picks up the new name on its next push.
+def _apply_rig_hostname(rig_name: str) -> dict:
+    """Synchronously rename the rig's system hostname to match its CatStack
+    name. Returns {ok, action, message}. Used by both the on-demand
+    /sync-hostname endpoint and the fire-and-forget post-CRUD hook.
 
-    No-op when the rig name isn't a valid RFC 1123 hostname (e.g. contains
-    underscores or spaces) — Linux would accept it but it's a bad idea."""
+    Skips when the rig name isn't a valid RFC 1123 hostname (e.g. contains
+    underscores or spaces) — Linux would accept it but breaks DNS / Vast
+    portal display."""
     if not _HOSTNAME_RE.match(rig_name):
-        log.info("hostname sync skipped for %s: not a valid hostname", rig_name)
-        return
+        return {"ok": False, "action": "skipped", "message": f"'{rig_name}' is not a valid RFC 1123 hostname"}
+    db = get_db()
+    rig = Rig.get_by_name(db, rig_name)
+    if not rig:
+        return {"ok": False, "action": "error", "message": f"rig '{rig_name}' not found"}
+    try:
+        pool = get_pool()
+        cmd = (
+            f"current=$(hostname); "
+            f"if [ \"$current\" != '{rig_name}' ]; then "
+            f"  hostnamectl set-hostname '{rig_name}' && "
+            f"  sed -i 's/^127\\.0\\.1\\.1.*/127.0.1.1\\t{rig_name}/' /etc/hosts; "
+            f"  grep -q '^127\\.0\\.1\\.1' /etc/hosts || echo -e '127.0.1.1\\t{rig_name}' >> /etc/hosts; "
+            f"  if systemctl is-active --quiet vastai 2>/dev/null; then "
+            f"    systemctl restart vastai vast_metrics 2>/dev/null || true; "
+            f"  fi; "
+            f"  echo \"renamed: $current -> {rig_name}\"; "
+            f"else "
+            f"  echo \"already {rig_name}\"; "
+            f"fi"
+        )
+        out, _, rc = pool.exec(rig, cmd, timeout=20)
+        if rc != 0:
+            return {"ok": False, "action": "error", "message": f"SSH exit {rc}: {out.strip()}"}
+        out = out.strip()
+        if out.startswith("renamed:"):
+            return {"ok": True, "action": "renamed", "message": out}
+        return {"ok": True, "action": "noop", "message": out}
+    except Exception as e:
+        return {"ok": False, "action": "error", "message": f"{type(e).__name__}: {e}"}
 
+
+def _hook_rig_hostname_sync(rig_name: str) -> None:
+    """Fire-and-forget wrapper around _apply_rig_hostname for use in CRUD
+    hooks where we don't want to block the response."""
     def _do():
-        try:
-            db = get_db()
-            rig = Rig.get_by_name(db, rig_name)
-            if not rig:
-                return
-            pool = get_pool()
-            # Quote-safe: rig_name has already passed _HOSTNAME_RE.
-            cmd = (
-                f"current=$(hostname); "
-                f"if [ \"$current\" != '{rig_name}' ]; then "
-                f"  hostnamectl set-hostname '{rig_name}' && "
-                f"  sed -i 's/^127\\.0\\.1\\.1.*/127.0.1.1\\t{rig_name}/' /etc/hosts; "
-                f"  grep -q '^127\\.0\\.1\\.1' /etc/hosts || echo -e '127.0.1.1\\t{rig_name}' >> /etc/hosts; "
-                f"  if systemctl is-active --quiet vastai 2>/dev/null; then "
-                f"    systemctl restart vastai vast_metrics 2>/dev/null || true; "
-                f"  fi; "
-                f"  echo \"renamed: $current -> {rig_name}\"; "
-                f"else "
-                f"  echo \"already {rig_name}\"; "
-                f"fi"
-            )
-            out, _, rc = pool.exec(rig, cmd, timeout=20)
-            if rc == 0 and "renamed:" in out:
-                log.info("hostname sync %s: %s", rig_name, out.strip())
-        except Exception as e:
-            log.warning("hostname sync failed for %s: %s", rig_name, e)
+        res = _apply_rig_hostname(rig_name)
+        if res["ok"] and res["action"] == "renamed":
+            log.info("hostname sync %s: %s", rig_name, res["message"])
+        elif not res["ok"]:
+            log.warning("hostname sync failed for %s: %s", rig_name, res["message"])
     _executor.submit(_do)
 
 
