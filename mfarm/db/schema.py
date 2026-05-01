@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS rigs (
     os_info         TEXT,
     gpu_list        TEXT,
     cpu_model       TEXT,
+    mac             TEXT,
     notes           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -125,6 +126,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(TABLES)
+    # Idempotent column additions for DBs created before the column existed.
+    # CREATE TABLE IF NOT EXISTS doesn't alter existing tables, so any column
+    # added after the initial schema needs an explicit ALTER guarded against
+    # duplicate-column errors.
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(rigs)").fetchall()}
+    if "mac" not in existing_cols:
+        conn.execute("ALTER TABLE rigs ADD COLUMN mac TEXT")
+        conn.commit()
     # Track schema version
     existing = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     if existing is None or existing < SCHEMA_VERSION:

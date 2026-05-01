@@ -21,6 +21,7 @@ class Rig:
     os_info: str | None = None
     gpu_list: str | None = None  # JSON string
     cpu_model: str | None = None
+    mac: str | None = None
     notes: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -48,21 +49,21 @@ class Rig:
         if self.id is None:
             cur = db.execute(
                 """INSERT INTO rigs (name, host, ssh_port, ssh_user, ssh_key_path,
-                   group_id, flight_sheet_id, oc_profile_id, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   group_id, flight_sheet_id, oc_profile_id, mac, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.name, self.host, self.ssh_port, self.ssh_user,
                  self.ssh_key_path, self.group_id, self.flight_sheet_id,
-                 self.oc_profile_id, self.notes),
+                 self.oc_profile_id, self.mac, self.notes),
             )
             self.id = cur.lastrowid
         else:
             db.execute(
                 """UPDATE rigs SET name=?, host=?, ssh_port=?, ssh_user=?,
                    ssh_key_path=?, group_id=?, flight_sheet_id=?, oc_profile_id=?,
-                   notes=?, updated_at=datetime('now') WHERE id=?""",
+                   mac=?, notes=?, updated_at=datetime('now') WHERE id=?""",
                 (self.name, self.host, self.ssh_port, self.ssh_user,
                  self.ssh_key_path, self.group_id, self.flight_sheet_id,
-                 self.oc_profile_id, self.notes, self.id),
+                 self.oc_profile_id, self.mac, self.notes, self.id),
             )
         db.commit()
         return self

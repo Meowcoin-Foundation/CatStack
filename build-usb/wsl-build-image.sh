@@ -293,6 +293,11 @@ cp "$SRC/mfarm/worker/miner-wrapper.sh" "$MNT/opt/mfarm/miner-wrapper.sh"
 cp "$SRC/mfarm/worker/mfarm-agent.service" "$MNT/etc/systemd/system/mfarm-agent.service"
 chmod +x "$MNT/opt/mfarm/mfarm-agent.py" "$MNT/opt/mfarm/miner-wrapper.sh"
 
+cp "$SRC/mfarm/worker/xmrig-1gb-hugepages.service" "$MNT/etc/systemd/system/xmrig-1gb-hugepages.service"
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/xmrig-1gb-hugepages.service \
+    "$MNT/etc/systemd/system/multi-user.target.wants/xmrig-1gb-hugepages.service"
+
 cp "$SRC/mfarm/worker/meowos-phonehome.py" "$MNT/opt/mfarm/meowos-phonehome.py"
 cp "$SRC/mfarm/worker/meowos-phonehome.service" "$MNT/etc/systemd/system/meowos-phonehome.service"
 chmod +x "$MNT/opt/mfarm/meowos-phonehome.py"
@@ -301,6 +306,15 @@ cp "$SRC/mfarm/worker/meowos-webui.py" "$MNT/opt/mfarm/meowos-webui.py"
 cp "$SRC/mfarm/worker/meowos-webui.html" "$MNT/opt/mfarm/meowos-webui.html"
 cp "$SRC/mfarm/worker/meowos-webui.service" "$MNT/etc/systemd/system/meowos-webui.service"
 chmod +x "$MNT/opt/mfarm/meowos-webui.py"
+
+# Auto-updater: rig polls console every 5 min for newer agent bundle
+cp "$SRC/mfarm/worker/meowos-updater.py" "$MNT/opt/mfarm/meowos-updater.py"
+cp "$SRC/mfarm/worker/meowos-updater.service" "$MNT/etc/systemd/system/meowos-updater.service"
+cp "$SRC/mfarm/worker/meowos-updater.timer" "$MNT/etc/systemd/system/meowos-updater.timer"
+chmod +x "$MNT/opt/mfarm/meowos-updater.py"
+
+# Stamp VERSION onto the rig — updater compares this to console's /api/agent/version
+cp "$SRC/VERSION" "$MNT/opt/mfarm/VERSION"
 
 cp "$SRC/build-usb/mfarm-files/config.json" "$MNT/etc/mfarm/config.json"
 chroot "$MNT" chown -R miner:miner /etc/mfarm /opt/mfarm /var/log/mfarm /var/run/mfarm
@@ -439,6 +453,7 @@ FBSVC
 
 chroot "$MNT" systemctl enable mfarm-firstboot.service
 chroot "$MNT" systemctl enable dhcp-forcer.service 2>/dev/null || true
+chroot "$MNT" systemctl enable meowos-updater.timer 2>/dev/null || true
 
 # Cleanup
 chroot "$MNT" apt-get clean

@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+# install-vast.sh — Vast.ai host daemon install for MeowOS rigs
+#
+# Bakes in every gotcha catalogued in reference_vastai_install.md so a fresh
+# rig goes from "MeowOS shipping defaults" to "Vast daemon active and reporting
+# to the controller" in one shot, with no interactive conffile prompts and no
+# tokens burned to surprise failures.
+#
+# Usage:
+#   sudo bash install-vast.sh <TOKEN> [PORT_BASE]
+#
+#   TOKEN     — single-use install token from https://cloud.vast.ai/host/setup/
+#               (consumed at first /api/v0/daemon/identify/ POST — get a fresh
+#               one from the portal before each run, do not reuse)
+#   PORT_BASE — first 2 digits of the port range, default 41 → opens 41000-41200.
+#               Must be unique per rig if multiple rigs share a public IP
+#               (they NAT to one router); pick 42 for the next rig, etc.
+#
+# Run this on the rig, not from the console. SCP it over first, e.g.:
+#   scp install-vast.sh root@<rig-ip>:/tmp/
+#   ssh root@<rig-ip> "bash /tmp/install-vast.sh ABC123 42"
+
+set -uo pipefail
+
+# ── Args ───────────────────────────────────────────────────────────────
+TOKEN="${1:-}"
+PORT_BASE="${2:-41}"
+
+if [[ -z "$TOKEN" ]]; then
+    read -rp "Vast install token: " TOKEN
+fi
+[[ -n "$TOKEN" ]] || { echo "ERROR: install token required" >&2; exit 1; }
+[[ "$PORT_BASE" =~ ^[0-9]+$ ]] || { echo "ERROR: port-base must be numeric" >&2; exit 1; }
+
+PORT_START="${PORT_BASE}000"
+PORT_END="${PORT_BASE}200"
+LOG=/var/log/vast-install.log
+
+say()  { echo -e "\n=== $* ==="; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "FATAL: $*" >&2; exit 1; }
+
+[[ "$EUID" -eq 0 ]] || die "must run as root (try: sudo bash $0 $*)"
+
+# ── 1/10  Pre-flight ───────────────────────────────────────────────────
+say "1/10  pre-flight checks"
+
+# GPU must be on the PCIe bus — kaalia FATALs without one and burns the token.
+# Note: must NOT use `grep -q` here. With `set -o pipefail` (above), grep -q's
+# early exit on first match closes the pipe, lspci dies with SIGPIPE (exit 141),
+# and pipefail propagates the 141 — making the `! pipe` test fire die() even
+# when the GPU is present and grep matched. Use `grep ... >/dev/null` instead.
+if ! lspci -nn | grep -iE 'vga|3d.*nvidia|nvidia.*controller' >/dev/null; then
+    die "no NVIDIA GPU on PCIe bus. Reseat the card / verify 12VHPWR fully clicked / enable 'Above 4G Decoding' in BIOS, then retry."
+fi
+if ! nvidia-smi -q >/dev/null 2>&1; then
+    echo "  nvidia driver not communicating, attempting modprobe..."
+    nvidia-modprobe -A >/dev/null 2>&1 || modprobe nvidia
+    nvidia-smi -q >/dev/null 2>&1 || die "nvidia driver still not responding. Reboot or fix driver before continuing."
+fi
+
+# Network sanity — both endpoints the install hits.
+curl -sf --max-time 8 -o /dev/null https://console.vast.ai/install \
+    || die "cannot reach console.vast.ai (network or DNS issue)"
+curl -sf --max-time 8 -o /dev/null https://download.docker.com/linux/ubuntu/dists/jammy/InRelease \
+    || warn "download.docker.com slow/unreachable — pre-cache step may take longer"
+
+# Mask the daily-update timers up front so they can't kick off mid-install.
+# The full mask (and stop of any service this script touches) happens in
+# step 3, but those firing between step 1 and step 3 has bitten us — they
+# hold the apt lock long enough to make `apt-get update` fail silently and
+# every subsequent `apt install` fail with "Unable to locate package".
+for t in apt-daily.timer apt-daily-upgrade.timer; do
+    systemctl stop "$t" 2>/dev/null || true
+    systemctl mask "$t" >/dev/null 2>&1 || true
+done
+
+# Wait up to 60s for any in-flight apt/dpkg to release the lock — same
+# motivation as above. Once the lock is held by an unattended-upgrades
+# run we already missed, all we can do is wait it out.
+for _ in $(seq 1 30); do
+    if ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1 \
+       && ! pgrep -f unattended-upgrade >/dev/null 2>&1; then
+        break
+    fi
+    echo "  waiting for in-flight apt/dpkg to finish..."
+    sleep 2
+done
+
+# Refresh apt cache before installing tools — without this, fresh-flashed
+# images can have stale package references.
+apt-get update -qq 2>&1 | tail -3 || warn "apt-get update produced warnings"
+
+# MeowOS images install cuda-cudart-12-8 via `dpkg -i --force-depends` (no
+# CUDA repo configured), which leaves apt's dependency tree permanently
+# broken — every subsequent `apt-get install` then fails with "Unmet
+# dependencies" because the cuda-cudart deps (cuda-toolkit-config-common
+# etc.) aren't installable. `-f install` resolves this by removing the
+# offending package; safe for Vast hosts (Vast workloads bring their own
+# CUDA in containers; the host only needs the nvidia driver).
+apt-get -f install -y 2>&1 | tail -3 || warn "apt-get -f install warnings (may be cosmetic)"
+
+# Tools the script uses. python3-pip is essential as a fallback path for
+# python3-requests when apt has unresolvable conflicts.
+for pkg in rsync screen python3 python3-pip python3-requests gdisk parted; do
+    dpkg -s "$pkg" >/dev/null 2>&1 \
+        || apt-get install -y -qq "$pkg" 2>&1 | tail -3 \
+        || warn "apt install $pkg failed (will fall back if critical)"
+done
+
+# The Vast python installer (downloaded in step 7) hard-imports `requests` at
+# its top — if that import fails, step 8 crashes immediately and the user has
+# no idea why. Verify it's importable; pip-fallback if apt couldn't deliver it.
+if ! python3 -c 'import requests' 2>/dev/null; then
+    echo "  python3-requests not importable — installing via pip"
+    # Try ensurepip first in case pip module isn't installed (python3-venv
+    # ships ensurepip but not pip itself on some Ubuntu builds).
+    python3 -m ensurepip --upgrade 2>&1 | tail -2 || true
+    python3 -m pip install --break-system-packages --quiet requests 2>&1 | tail -3 \
+        || python3 -m pip install --quiet requests 2>&1 | tail -3 \
+        || die "could not install python3 'requests' module via apt OR pip. Fix python3 environment then retry."
+    python3 -c 'import requests' >/dev/null 2>&1 \
+        || die "'requests' still not importable after pip install. Investigate."
+fi
+
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+echo "  GPU: $GPU_NAME"
+
+# ── 2/10  Resize root partition to fill the disk ───────────────────────
+say "2/10  partition / filesystem"
+
+ROOT_DEV=$(findmnt -no SOURCE /)              # /dev/nvme0n1p2
+DISK_DEV="/dev/$(lsblk -no PKNAME "$ROOT_DEV")"
+PART_NUM=$(grep -oE '[0-9]+$' <<<"$ROOT_DEV")
+
+# Free space at end of disk, in GiB
+FREE_GB=$(parted -s "$DISK_DEV" unit GiB print free 2>/dev/null \
+    | awk '/Free Space/ { gsub("GiB","",$3); print int($3) }' | tail -1)
+
+if (( ${FREE_GB:-0} > 5 )); then
+    echo "  ${FREE_GB} GiB unallocated at end of $DISK_DEV — growing partition $PART_NUM"
+    sgdisk -e "$DISK_DEV" >/dev/null
+    echo Yes | parted "$DISK_DEV" ---pretend-input-tty resizepart "$PART_NUM" 100% >/dev/null 2>&1
+    partprobe "$DISK_DEV"
+    sleep 1
+    resize2fs "$ROOT_DEV" >/dev/null
+    df -h /
+else
+    echo "  partition already covers full disk ($FREE_GB GiB free unallocated)"
+fi
+
+# ── 3/10  Mask conflicting MeowOS / apt services ───────────────────────
+say "3/10  mask services that fight the install"
+# `disable` does NOT survive a reboot for these — must MASK. If unit file is
+# in /etc/systemd/system/ (admin-installed), `mask` fails until file removed.
+KILL_SVCS=(
+    meowos-xmrig
+    mfarm-agent
+    meowos-phonehome
+    meowos-webui
+    apt-daily.timer
+    apt-daily-upgrade.timer
+    apt-daily.service
+    apt-daily-upgrade.service
+    unattended-upgrades.service
+)
+for svc in "${KILL_SVCS[@]}"; do
+    systemctl stop "$svc" 2>/dev/null
+    rm -f "/etc/systemd/system/$svc" \
+          "/etc/systemd/system/multi-user.target.wants/$svc" \
+          "/etc/systemd/system/timers.target.wants/$svc"
+done
+systemctl daemon-reload
+for svc in "${KILL_SVCS[@]}"; do
+    systemctl mask "$svc" >/dev/null 2>&1
+done
+pkill -9 xmrig 2>/dev/null || true
+echo "  masked: ${KILL_SVCS[*]}"
+
+# ── 4/10  Preserve env across sudo (kills conffile prompts) ────────────
+say "4/10  /etc/sudoers.d/99-preserve-frontend"
+cat > /etc/sudoers.d/99-preserve-frontend <<'EOF'
+Defaults env_keep += "DEBIAN_FRONTEND NEEDRESTART_MODE"
+EOF
+chmod 440 /etc/sudoers.d/99-preserve-frontend
+visudo -cf /etc/sudoers.d/99-preserve-frontend >/dev/null \
+    || die "sudoers file we just wrote is invalid — investigate /etc/sudoers.d/99-preserve-frontend"
+
+# ── 5/10  Clean any prior half-installed Vast state ────────────────────
+say "5/10  cleanup of any prior install state"
+systemctl stop vastai vast_metrics vastai_bouncer 2>/dev/null
+fuser -k /var/lib/docker 2>/dev/null
+umount -l /var/lib/docker 2>/dev/null
+losetup -D 2>/dev/null
+sed -i '/docker/d' /etc/fstab
+userdel -f vastai_kaalia 2>/dev/null
+groupdel vastai_kaalia 2>/dev/null
+rm -rf \
+    /var/lib/vastai_kaalia \
+    /var/lib/docker \
+    /var/lib/docker-loop.xfs \
+    /var/lib/docker-temporarily-renamed \
+    /etc/systemd/system/vastai* \
+    /etc/systemd/system/vast_metrics.service \
+    /etc/systemd/system/vastai_bouncer.service \
+    /etc/systemd/system/var-lib-docker.mount \
+    /etc/systemd/system/multi-user.target.wants/vastai* \
+    /etc/systemd/system/multi-user.target.wants/vast_metrics.service \
+    /etc/docker \
+    /var/spool/cron/crontabs/vastai_kaalia \
+    /tmp/install \
+    /root/vastai_install_logs.tar.gz
+systemctl daemon-reload
+echo "  state cleaned"
+
+# Recover dpkg if a previous install was kill -9'd
+if ! dpkg --audit 2>&1 | head -1 | grep -q '^$'; then
+    echo "  dpkg in interrupted state — running dpkg --configure -a"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+fi
+
+# ── 6/10  Pre-cache Docker packages ────────────────────────────────────
+# Vast's installer fetches these from download.docker.com mid-install. That CDN
+# has timed out on us repeatedly (174 kB/s, broken PPA mirror). Cache the .debs
+# now while the network is good — apt will use the cached versions later.
+say "6/10  pre-cache Docker / nvidia-docker .debs"
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -d --fix-missing \
+    nvidia-docker2 docker-ce docker-ce-cli docker-buildx-plugin \
+    docker-compose-plugin docker-ce-rootless-extras containerd.io \
+    >/dev/null 2>&1 \
+    || warn "some packages didn't pre-cache (may be repo not set up yet — install will set repos and retry)"
+
+CACHED=$(ls /var/cache/apt/archives/ 2>/dev/null | grep -cE '^(docker|nvidia-)' || echo 0)
+echo "  ${CACHED} docker/nvidia .debs in apt cache"
+
+# ── 7/10  Fetch the install script with retries ────────────────────────
+say "7/10  fetch Vast install script"
+rm -f /tmp/install
+for try in 1 2 3 4 5; do
+    wget -q --tries=2 --timeout=15 https://console.vast.ai/install -O /tmp/install
+    if [[ -s /tmp/install ]] && head -1 /tmp/install | grep -q 'python'; then
+        echo "  fetched $(stat -c%s /tmp/install) bytes"
+        break
+    fi
+    warn "wget attempt $try produced an empty/bad file, retrying in 5s..."
+    rm -f /tmp/install
+    sleep 5
+done
+[[ -s /tmp/install ]] || die "could not fetch a valid install script after 5 tries"
+
+# ── 8/10  Launch install in screen (survives SSH drops) ────────────────
+say "8/10  launch install in screen 'vastinstall' (logs to $LOG)"
+> "$LOG"
+screen -dmS vastinstall bash -c "
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    python3 /tmp/install '$TOKEN' \
+        --ports $PORT_START $PORT_END \
+        --no-driver \
+        --agree-to-nvidia-license 2>&1 | tee $LOG
+    echo === EXIT \$? === >> $LOG
+"
+echo "  install running detached. you can attach with: screen -r vastinstall"
+
+# ── 9/10  Watch progress (timeout 20 min) ──────────────────────────────
+say "9/10  watching install (timeout 20 min)"
+LAST=""
+DEADLINE=$(( $(date +%s) + 1200 ))
+while (( $(date +%s) < DEADLINE )); do
+    sleep 8
+    if grep -q '=== EXIT' "$LOG" 2>/dev/null; then break; fi
+    NEW=$(grep -oE '=> [^[:cntrl:]]+' "$LOG" 2>/dev/null | tail -1)
+    if [[ -n "$NEW" && "$NEW" != "$LAST" ]]; then
+        echo "  $NEW"
+        LAST="$NEW"
+    fi
+done
+
+if grep -q 'Install failed' "$LOG"; then
+    echo
+    echo "INSTALL FAILED. Tail of log:"
+    tail -20 "$LOG"
+
+    # Recovery for the common 'NVML test failure' mode. Symptoms: the python
+    # installer made it past identify (machine_id is set) and installed Docker,
+    # but its `test_nvml_error.sh` fails because `/etc/docker/daemon.json` was
+    # written without a `runtimes.nvidia` entry — the test uses
+    # `docker run --runtime=nvidia` which then errors with
+    # "unknown or invalid runtime name: nvidia".
+    #
+    # Fix: register the runtime via nvidia-ctk (preserves Vast's existing
+    # daemon.json keys), restart docker, re-run Vast's exact test, and if it
+    # passes, start the services manually. The token was already consumed at
+    # identify, so this avoids burning a fresh one.
+    if [[ -f /var/lib/vastai_kaalia/machine_id ]] \
+       && [[ -f /var/lib/vastai_kaalia/test_nvml_error.sh ]] \
+       && grep -qE '(NVML|nvml|Test docker)' "$LOG"; then
+        say "RECOVERY: NVML-test failure detected — configuring nvidia docker runtime"
+        if command -v nvidia-ctk >/dev/null 2>&1; then
+            nvidia-ctk runtime configure --runtime=docker --set-as-default=false 2>&1 | tail -3 \
+                || warn "nvidia-ctk runtime configure failed"
+            systemctl restart docker
+            sleep 3
+            test_out=$(bash /var/lib/vastai_kaalia/test_nvml_error.sh 2>&1 | tail -3)
+            if echo "$test_out" | grep -q 'does not have the problem'; then
+                echo "  NVML test now passes — starting services"
+                systemctl daemon-reload
+                systemctl enable --now vastai vast_metrics 2>&1 | tail -3
+                sleep 5
+                if systemctl is-active --quiet vastai; then
+                    echo "  vastai service active — recovery succeeded, continuing to step 10"
+                    # fall through to post-install hardening below
+                else
+                    echo "  vastai still inactive after recovery"
+                    journalctl -u vastai --no-pager -n 10 2>&1 | tail -10
+                    exit 2
+                fi
+            else
+                echo "  NVML test still fails:"
+                echo "$test_out"
+                exit 2
+            fi
+        else
+            echo "  nvidia-ctk not installed — can't recover automatically"
+            exit 2
+        fi
+    else
+        echo
+        echo "Full diagnostic logs at: /root/vastai_install_logs.tar.gz"
+        echo "If it died after identify, your token is burned — get a fresh one before retrying."
+        exit 2
+    fi
+fi
+if ! grep -q 'Daemon Running' "$LOG"; then
+    echo "INSTALL TIMED OUT after 20 min without 'Daemon Running'. Last log lines:"
+    tail -10 "$LOG"
+    exit 3
+fi
+
+# ── 10/10  Post-install hardening ──────────────────────────────────────
+say "10/10  post-install fixes"
+
+# vast_metrics.service ships launch_metrics_pusher.sh without +x. Vast's
+# auto-update re-extracts daemon.tar.gz periodically and the perm reverts —
+# permanent fix is an ExecStartPre chmod in the unit.
+if [[ -f /etc/systemd/system/vast_metrics.service ]] && \
+   ! grep -q '^ExecStartPre=/bin/chmod' /etc/systemd/system/vast_metrics.service; then
+    sed -i '/^\[Service\]/a ExecStartPre=/bin/chmod +x /var/lib/vastai_kaalia/latest/launch_metrics_pusher.sh /var/lib/vastai_kaalia/latest/machine_metrics_pusher.py' \
+        /etc/systemd/system/vast_metrics.service
+    systemctl daemon-reload
+    systemctl restart vast_metrics
+    echo "  patched vast_metrics.service with ExecStartPre chmod"
+fi
+
+# Push fresh machine_info so the Vast portal updates within ~30s instead of
+# waiting for the next cron-scheduled push (which can be ~1h away).
+sudo -u vastai_kaalia bash -c 'cd /var/lib/vastai_kaalia && python3 send_mach_info.py' 2>&1 \
+    | tail -1
+
+# ── Summary ────────────────────────────────────────────────────────────
+say "DONE"
+MACHINE_ID=$(cat /var/lib/vastai_kaalia/machine_id 2>/dev/null)
+LOCAL_IP=$(hostname -I | awk '{print $1}')
+PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null)
+
+cat <<EOF
+
+  status:      vastai $(systemctl is-active vastai), vast_metrics $(systemctl is-active vast_metrics)
+  GPU:         ${GPU_NAME}
+  internal:    ${LOCAL_IP}
+  public:      ${PUBLIC_IP:-?}
+  port range:  ${PORT_START}-${PORT_END}
+  machine_id:  ${MACHINE_ID}
+
+NEXT STEPS (manual, on the Vast host portal):
+  1. Forward TCP+UDP ${PORT_START}-${PORT_END} on the router → ${LOCAL_IP}
+     (skip if already done for this rig's IP)
+  2. Click 'List' on https://cloud.vast.ai/host/machines/ for machine_id
+     ${MACHINE_ID:0:16}...
+EOF

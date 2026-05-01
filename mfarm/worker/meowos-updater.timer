@@ -1,0 +1,11 @@
+[Unit]
+Description=MeowOS Auto-Updater Timer
+
+[Timer]
+# Wait 60s after boot so phonehome has had a shot at locating the console
+OnBootSec=60sec
+OnUnitActiveSec=5min
+Unit=meowos-updater.service
+
+[Install]
+WantedBy=timers.target

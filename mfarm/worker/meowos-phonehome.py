@@ -5,6 +5,7 @@ Broadcasts this rig's IP, MAC, and hostname to the MeowFarm server every 60 seco
 Runs as a systemd service so the rig is discoverable without a monitor.
 """
 import json
+import os
 import socket
 import subprocess
 import time
@@ -12,6 +13,22 @@ import urllib.request
 
 MEOWFARM_PORT = 8888
 BROADCAST_INTERVAL = 60
+CONSOLE_URL_FILE = "/var/run/mfarm/console_url"
+
+
+def _save_console_url(url: str) -> None:
+    """Record the working console URL so meowos-updater can find it.
+
+    Written to tmpfs (/var/run/mfarm/), so it's regenerated each boot once
+    phonehome locates the server again. Tolerant of dir/permission errors —
+    the updater treats a missing file as 'not yet known'.
+    """
+    try:
+        os.makedirs(os.path.dirname(CONSOLE_URL_FILE), exist_ok=True)
+        with open(CONSOLE_URL_FILE, "w") as f:
+            f.write(url)
+    except OSError:
+        pass
 
 
 def get_interfaces():
@@ -69,11 +86,24 @@ def phone_home():
         "gateway": gateway,
     }).encode()
 
-    # Method 1: UDP broadcast on port 8889 (MeowFarm listens)
+    # Method 1: UDP broadcast on port 8889 (MeowFarm listens). The console
+    # replies with its HTTP port; we use the reply's source IP as the console
+    # URL. This is the only way to discover a cross-subnet console — HTTP
+    # fallback below only probes our own /24.
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("0.0.0.0", 0))  # ephemeral source port for recvfrom
+        sock.settimeout(2.0)
         sock.sendto(payload, ("255.255.255.255", 8889))
+        try:
+            data, addr = sock.recvfrom(4096)
+            reply = json.loads(data.decode())
+            if reply.get("type") == "phonehome-reply":
+                port = reply.get("port", MEOWFARM_PORT)
+                _save_console_url(f"http://{addr[0]}:{port}")
+        except (socket.timeout, OSError, ValueError):
+            pass
         sock.close()
     except Exception:
         pass
@@ -85,13 +115,14 @@ def phone_home():
         # Try common addresses for the MeowFarm server
         for host_part in [gateway.split(".")[-1], "1"]:
             try:
-                url = f"http://{subnet}.{host_part}:{MEOWFARM_PORT}/api/phonehome"
+                base = f"http://{subnet}.{host_part}:{MEOWFARM_PORT}"
                 req = urllib.request.Request(
-                    url, data=payload,
+                    f"{base}/api/phonehome", data=payload,
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
                 urllib.request.urlopen(req, timeout=3)
+                _save_console_url(base)
                 break
             except Exception:
                 continue

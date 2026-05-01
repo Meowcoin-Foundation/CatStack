@@ -80,18 +80,49 @@ async def poll_all_rigs():
 
 
 def _poll_one(pool, rig: Rig) -> dict | None:
+    """Probe a rig over SSH. Returns:
+      - None when SSH itself fails (rig truly unreachable → OFFLINE)
+      - dict otherwise. May contain mfarm stats keys (miner, gpus, cpu, …)
+        when mfarm-agent is running, plus a "_vastai_active" flag when the
+        rig is hosting Vast.ai (mfarm-agent is masked on Vast hosts so
+        stats.json won't exist there — but the rig is still online).
+    """
     try:
-        stdout, _, rc = pool.exec(rig, "cat /var/run/mfarm/stats.json", timeout=5)
-        if rc == 0 and stdout.strip():
-            return json.loads(stdout)
+        # Combined probe: connectivity marker + vastai status + mfarm stats.
+        # The marker line lets us distinguish "ssh worked, no miner" from
+        # "ssh failed entirely" — without it both look like empty stdout.
+        cmd = (
+            "echo OK_REACHABLE; "
+            "systemctl is-active vastai 2>/dev/null || echo missing; "
+            "cat /var/run/mfarm/stats.json 2>/dev/null"
+        )
+        stdout, _, rc = pool.exec(rig, cmd, timeout=5)
+        if rc != 0 or not stdout.startswith("OK_REACHABLE"):
+            return None
+        lines = stdout.split("\n", 2)
+        result: dict = {}
+        # Line 1: vastai status — "active" / "inactive" / "missing" (no unit)
+        if len(lines) > 1:
+            vastai_state = lines[1].strip()
+            if vastai_state == "active":
+                result["_vastai_active"] = True
+        # Line 2+: mfarm stats.json contents (may be empty on Vast/idle rigs)
+        if len(lines) > 2 and lines[2].strip().startswith("{"):
+            try:
+                result.update(json.loads(lines[2]))
+            except Exception:
+                pass
+        return result
     except Exception:
         pass
     return None
 
 
 def _build_rigs_payload() -> list[dict]:
+    from mfarm.web.api import _ip_to_mac_table
     db = get_db()
     rigs = Rig.get_all(db)
+    mac_table = _ip_to_mac_table()
     result = []
     for rig in rigs:
         stats = _stats_cache.get(rig.name)
@@ -99,6 +130,7 @@ def _build_rigs_payload() -> list[dict]:
         entry = {
             "name": rig.name,
             "host": rig.host,
+            "mac": rig.mac or mac_table.get(rig.host),
             "group": rig.group_name,
             "flight_sheet": rig.flight_sheet_name,
             "oc_profile": rig.oc_profile_name,
@@ -145,19 +177,33 @@ _dismissed_macs = _load_dismissed_macs()
 
 
 async def udp_listener():
-    """Listen for phone-home UDP broadcasts from MeowOS rigs."""
+    """Listen for phone-home UDP broadcasts from MeowOS rigs.
+
+    On each phonehome, reply with our HTTP port so the rig can compute the
+    console URL from the reply's source IP. This is what makes auto-update
+    work cross-subnet: if the rig and console are on different /24s but the
+    same L2 broadcast domain, the rig's gateway isn't us and HTTP discovery
+    can't find us — but the broadcast still reaches us, and the reply gets
+    routed back with our IP as source.
+    """
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", 8889))
     sock.setblocking(False)
 
+    reply = json.dumps({"type": "phonehome-reply", "port": 8888}).encode()
+
     while True:
         try:
-            data = await loop.sock_recv(sock, 4096)
+            data, addr = await loop.sock_recvfrom(sock, 4096)
             msg = json.loads(data.decode())
             if msg.get("type") == "phonehome":
                 _handle_phonehome(msg)
+                try:
+                    await loop.sock_sendto(sock, reply, addr)
+                except OSError:
+                    pass
         except Exception:
             await asyncio.sleep(1)
 
@@ -209,6 +255,12 @@ def _handle_phonehome(msg: dict):
             }
             log.info("Phone-home: %s (%s) at %s", hostname, mac, ip)
 
+    # Self-heal IP drift: if a phonehome's MAC matches a claimed rig that has
+    # this MAC stored, update Rig.host when it differs (DHCP lease shifted).
+    # Also backfill: when a rig.host matches but rig.mac is null, populate it
+    # so future drift can be detected.
+    _reconcile_rig_host_from_phonehome(msg)
+
     # Push discovery update to WebSocket clients (filtered)
     payload = json.dumps({
         "type": "discovery",
@@ -219,6 +271,62 @@ def _handle_phonehome(msg: dict):
             asyncio.create_task(ws.send_text(payload))
         except Exception:
             pass
+
+
+def _reconcile_rig_host_from_phonehome(msg: dict) -> None:
+    """Match phonehome interfaces against claimed rigs by MAC and self-heal
+    IP drift. See _handle_phonehome for context.
+
+    Two cases per interface:
+      1. Drift: a Rig.mac matches the interface MAC and Rig.host != interface
+         IP. Update Rig.host, drop the SSH pool's cached connection (which
+         points at the stale host).
+      2. Backfill: a Rig.host matches the interface IP but Rig.mac is null
+         (rig was claimed before this feature existed, or before this rig's
+         first phonehome). Populate Rig.mac so case 1 can fire on next drift.
+    """
+    try:
+        db = get_db()
+        all_rigs = Rig.get_all(db)
+        host_changed_names: list[str] = []
+        for iface in msg.get("interfaces", []):
+            mac = (iface.get("mac") or "").lower()
+            ip = iface.get("ip") or ""
+            if not (mac and ip):
+                continue
+            # Case 1: drift
+            rig_by_mac = next(
+                (r for r in all_rigs if (r.mac or "").lower() == mac), None
+            )
+            if rig_by_mac is not None:
+                if rig_by_mac.host != ip:
+                    log.info(
+                        "rig %s: host drifted %s -> %s (mac %s) — auto-updating",
+                        rig_by_mac.name, rig_by_mac.host, ip, mac,
+                    )
+                    rig_by_mac.host = ip
+                    rig_by_mac.save(db)
+                    host_changed_names.append(rig_by_mac.name)
+                continue
+            # Case 2: backfill
+            rig_by_host = next(
+                (r for r in all_rigs if r.host == ip and not r.mac), None
+            )
+            if rig_by_host is not None:
+                log.info(
+                    "rig %s: backfilling mac=%s", rig_by_host.name, mac,
+                )
+                rig_by_host.mac = mac
+                rig_by_host.save(db)
+
+        if host_changed_names:
+            from mfarm.ssh.pool import get_pool
+            pool = get_pool()
+            with pool._lock:
+                for name in host_changed_names:
+                    pool._clients.pop(name, None)
+    except Exception as e:
+        log.warning("rig-host reconcile failed: %s", e)
 
 
 @asynccontextmanager

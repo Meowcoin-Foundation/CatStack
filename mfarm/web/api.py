@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
+import subprocess
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
@@ -435,6 +438,70 @@ async def push_ssh_key(name: str):
     }
 
 
+# ── MAC address resolution ──────────────────────────────────────────
+# Cached system ARP table + phone-home merge. Used by both /api/rigs
+# (REST) and the WS push so the dashboard can show each rig's MAC next
+# to its IP — useful for finding a rig after a DHCP rotation, and for
+# diagnosing "rig screen looks fine but it's offline" (no MAC = no L2
+# presence on any subnet we can reach).
+_arp_cache: dict[str, str] = {}
+_arp_cache_ts: float = 0.0
+_ARP_CACHE_TTL = 30.0
+_ARP_LINE_RE = re.compile(
+    r"(\d{1,3}(?:\.\d{1,3}){3})"
+    r"\D+"
+    r"([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})"
+)
+
+
+def _refresh_arp_cache() -> dict[str, str]:
+    """Read system ARP table; return {ip: mac}. 30s in-memory TTL.
+
+    Parses both the Windows (`192.168.x.y  xx-xx-...`) and Linux
+    (`? (192.168.x.y) at xx:xx:... [ether]`) output of `arp -a`. Failures
+    return the last good cache rather than wiping it — better stale than
+    blank.
+    """
+    global _arp_cache, _arp_cache_ts
+    now = _time.time()
+    if _arp_cache and now - _arp_cache_ts < _ARP_CACHE_TTL:
+        return _arp_cache
+    try:
+        out = subprocess.run(
+            ["arp", "-a"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return _arp_cache
+    fresh: dict[str, str] = {}
+    for line in out.splitlines():
+        m = _ARP_LINE_RE.search(line)
+        if m:
+            fresh[m.group(1)] = m.group(2).replace("-", ":").lower()
+    _arp_cache = fresh
+    _arp_cache_ts = now
+    return fresh
+
+
+def _ip_to_mac_table() -> dict[str, str]:
+    """Combined view: live ARP + phone-home history.
+
+    Phone-home wins over ARP when both have an entry — the rig has told
+    us its own MAC explicitly. ARP fills in for rigs that don't run
+    mfarm-agent (HiveOS rigs) or that aren't currently reachable but were
+    in cache before they went down.
+    """
+    table = dict(_refresh_arp_cache())
+    try:
+        from mfarm.web.app import _discovered_rigs
+        for mac, info in _discovered_rigs.items():
+            ip = info.get("ip")
+            if ip:
+                table[ip] = mac.lower()
+    except Exception:
+        pass
+    return table
+
+
 def _rig_to_dict(r: Rig) -> dict:
     return {
         "name": r.name, "host": r.host, "ssh_port": r.ssh_port,
@@ -442,6 +509,9 @@ def _rig_to_dict(r: Rig) -> dict:
         "flight_sheet": r.flight_sheet_name, "oc_profile": r.oc_profile_name,
         "agent_version": r.agent_version, "gpu_list": r.gpu_names,
         "cpu_model": r.cpu_model, "os_info": r.os_info, "notes": r.notes,
+        # Prefer the MAC stored on the rig (populated by phonehome reconcile);
+        # fall back to ARP only when we haven't seen a phonehome yet.
+        "mac": r.mac or _ip_to_mac_table().get(r.host),
     }
 
 
@@ -1084,6 +1154,125 @@ async def update_miners(name: str):
         return {"status": "error", "error": "; ".join(parts)}
 
 
+# ── Vast.ai install ─────────────────────────────────────────────────
+
+class VastInstallRequest(BaseModel):
+    token: str
+    port_base: int = 41
+
+
+@router.post("/rigs/{name}/install-vast")
+async def install_vast(name: str, body: VastInstallRequest):
+    """Push install-vast.sh to the rig and launch it under nohup.
+
+    The script (mfarm/worker/install-vast.sh) is the canonical Vast host
+    install — it does partition resize, service masking, sudoers env_keep,
+    docker .deb pre-cache, then runs Vast's installer in a screen session
+    on the rig and applies the post-install fixes (vast_metrics ExecStartPre
+    chmod, send_mach_info push). See reference_vastai_install.md for the
+    full list of gotchas it handles.
+
+    The script itself runs the Vast installer detached (`screen -dmS
+    vastinstall`), so the launch returns within a few seconds even though
+    the install continues on the rig for ~10 min. Frontend should poll
+    /api/rigs/{name}/vast-install-log to stream progress.
+    """
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"Rig '{name}' not found")
+
+    token = body.token.strip()
+    if not token or len(token) < 30:
+        raise HTTPException(400, "token looks invalid (too short)")
+    if not (10 <= body.port_base <= 99):
+        raise HTTPException(400, "port_base must be 10–99 (gives 10000–99200)")
+
+    from pathlib import Path
+    script_path = Path(__file__).resolve().parent.parent / "worker" / "install-vast.sh"
+    if not script_path.is_file():
+        raise HTTPException(500, f"install-vast.sh missing at {script_path}")
+    script = script_path.read_text(encoding="utf-8")
+
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+
+    try:
+        # Push the script
+        await loop.run_in_executor(
+            _executor,
+            lambda: pool.upload_string(rig, script, "/tmp/install-vast.sh"),
+        )
+        # Launch the install fully detached. The wrapping subshell `(...)` plus
+        # `setsid` ensures the spawned process has no parent shell or
+        # controlling terminal — without this, paramiko's exec_command can
+        # hang waiting for stdout EOF (the disowned background process keeps
+        # parent fds, channel never closes, channel.recv times out and the
+        # str() of the resulting socket.timeout is empty, surfacing to the
+        # dashboard as the unhelpful "install-vast launch failed:" message).
+        # The script's own monitor loop is the long-running part; we just
+        # kick it off and return. stdout/stderr go to /tmp/vast-runner.log,
+        # which the log endpoint tails.
+        cmd = (
+            f"chmod +x /tmp/install-vast.sh && "
+            f"rm -f /tmp/vast-runner.log && "
+            f"( setsid bash /tmp/install-vast.sh {shlex.quote(token)} {body.port_base} "
+            f"  > /tmp/vast-runner.log 2>&1 < /dev/null & ) && "
+            f"echo started"
+        )
+        out, _, rc = await loop.run_in_executor(
+            _executor, lambda: pool.exec(rig, cmd, timeout=15)
+        )
+        if rc != 0 or "started" not in out:
+            raise HTTPException(500, f"failed to launch install ({rc}): {out}")
+        return {"status": "started", "port_base": body.port_base, "log_path": "/tmp/vast-runner.log"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"install-vast launch failed: {e}")
+
+
+@router.get("/rigs/{name}/vast-install-log")
+async def vast_install_log(name: str, lines: int = 80):
+    """Tail the Vast install log on the rig and report whether it's still running.
+
+    Reads /tmp/vast-runner.log (the script's own stdout) and concatenates
+    the tail of /var/log/vast-install.log (the screen-session installer
+    output) so the frontend gets both layers in one fetch.
+    """
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404)
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    cmd = (
+        f"echo '--- /tmp/vast-runner.log ---'; "
+        f"tail -n {lines} /tmp/vast-runner.log 2>/dev/null; "
+        f"echo '--- /var/log/vast-install.log ---'; "
+        f"tail -n {lines} /var/log/vast-install.log 2>/dev/null; "
+        f"echo '---'; "
+        f"pgrep -af 'install-vast.sh|python3 /tmp/install' | grep -v 'pgrep\\|grep' | wc -l"
+    )
+    try:
+        out, _, _ = await loop.run_in_executor(
+            _executor, lambda: pool.exec(rig, cmd, timeout=8)
+        )
+        # Last line is the running-process count
+        parts = out.rstrip().rsplit("\n---\n", 1)
+        if len(parts) == 2:
+            log_text, tail = parts
+            try:
+                running = int(tail.strip().splitlines()[-1]) > 0
+            except Exception:
+                running = False
+        else:
+            log_text, running = out, False
+        return {"log": log_text, "running": running}
+    except Exception as e:
+        return {"log": f"error reading log: {e}", "running": False}
+
+
 # ── Bulk actions ────────────────────────────────────────────────────
 
 # Map of bulk action -> per-rig coroutine factory. Each factory returns a
@@ -1217,3 +1406,79 @@ async def bulk_action(action: str, target: str, body: dict | None = None):
 def get_version():
     from mfarm import __version__
     return {"version": __version__}
+
+
+# ── Agent auto-update ────────────────────────────────────────────────
+# Rigs running MeowOS poll these endpoints (see meowos-updater.py / .timer)
+# every ~5 min. /version is a cheap version check; /bundle returns a tarball
+# of the worker files keyed to install paths on the rig. Trust model: plain
+# HTTP on a trusted LAN, matching the existing phonehome posture.
+
+import io as _io
+import tarfile as _tarfile
+from pathlib import Path as _Path
+
+from fastapi.responses import StreamingResponse
+
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+_WORKER_DIR = _REPO_ROOT / "mfarm" / "worker"
+_VERSION_FILE = _REPO_ROOT / "VERSION"
+
+# arcname (rig path relative to /) → source path on console
+_AGENT_BUNDLE_FILES = {
+    "opt/mfarm/mfarm-agent.py":            _WORKER_DIR / "mfarm-agent.py",
+    "opt/mfarm/miner-wrapper.sh":          _WORKER_DIR / "miner-wrapper.sh",
+    "opt/mfarm/miner-downloader.sh":       _WORKER_DIR / "miner-downloader.sh",
+    "opt/mfarm/meowos-phonehome.py":       _WORKER_DIR / "meowos-phonehome.py",
+    "opt/mfarm/meowos-webui.py":           _WORKER_DIR / "meowos-webui.py",
+    "opt/mfarm/meowos-webui.html":         _WORKER_DIR / "meowos-webui.html",
+    "opt/mfarm/meowos-updater.py":         _WORKER_DIR / "meowos-updater.py",
+    "etc/systemd/system/mfarm-agent.service":         _WORKER_DIR / "mfarm-agent.service",
+    "etc/systemd/system/meowos-phonehome.service":    _WORKER_DIR / "meowos-phonehome.service",
+    "etc/systemd/system/meowos-webui.service":        _WORKER_DIR / "meowos-webui.service",
+    "etc/systemd/system/meowos-updater.service":      _WORKER_DIR / "meowos-updater.service",
+    "etc/systemd/system/meowos-updater.timer":        _WORKER_DIR / "meowos-updater.timer",
+    "etc/systemd/system/xmrig-1gb-hugepages.service": _WORKER_DIR / "xmrig-1gb-hugepages.service",
+    "etc/profile.d/miner-attach.sh":       _WORKER_DIR / "miner-attach.sh",
+    # VERSION must come last — the rig uses its presence as the "extract OK"
+    # marker before installing anything.
+    "opt/mfarm/VERSION":                   _VERSION_FILE,
+}
+
+
+def _agent_version() -> str:
+    try:
+        from mfarm import __version__
+        if __version__ and __version__ != "unknown":
+            return __version__
+    except Exception:
+        pass
+    try:
+        return _VERSION_FILE.read_text().strip()
+    except OSError:
+        return "0.0.0"
+
+
+@router.get("/agent/version")
+def get_agent_version():
+    return {"version": _agent_version()}
+
+
+@router.get("/agent/bundle")
+def get_agent_bundle():
+    """Tarball (gzip) of agent files for rig auto-update.
+
+    Tar entries use rig install paths relative to '/' (e.g.
+    'opt/mfarm/mfarm-agent.py'). The rig updater rejects any path outside
+    a fixed allow-list.
+    """
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for arc, src in _AGENT_BUNDLE_FILES.items():
+            if src.exists():
+                tar.add(str(src), arcname=arc)
+    return StreamingResponse(
+        _io.BytesIO(buf.getvalue()),
+        media_type="application/gzip",
+        headers={"X-Agent-Version": _agent_version()},
+    )

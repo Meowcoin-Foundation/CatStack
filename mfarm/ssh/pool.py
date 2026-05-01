@@ -144,31 +144,58 @@ class SSHConnectionPool:
             stdout.channel.close()
             raise
 
+    def _sftp_with_retry(self, rig: Rig, op, max_attempts: int = 3):
+        """Open SFTP and run `op(sftp)`. Retries up to `max_attempts` times,
+        dropping the cached client between attempts. Without this, a cached
+        connection going stale (long-running apt ops, mfarm-agent restart,
+        network blips) raises an empty paramiko/socket exception that callers
+        struggle to debug.
+
+        On final failure raises a wrapped Exception with the type+message of
+        the last underlying error, so the API response surfaces something
+        actionable instead of an empty string."""
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            client = self.get(rig)
+            try:
+                sftp = client.open_sftp()
+                try:
+                    return op(sftp)
+                finally:
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                last_exc = e
+                log.warning(
+                    "sftp op on %s failed (attempt %d/%d): %s: %s",
+                    rig.name, attempt + 1, max_attempts,
+                    type(e).__name__, e or "(no message)",
+                )
+                with self._lock:
+                    self._clients.pop(rig.name, None)
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                if attempt < max_attempts - 1:
+                    time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s, 2s backoff
+        msg = f"{type(last_exc).__name__}: {last_exc or '(empty)'}"
+        raise RuntimeError(f"sftp failed after {max_attempts} attempts on {rig.name}: {msg}")
+
     def upload(self, rig: Rig, local_path: str, remote_path: str):
-        client = self.get(rig)
-        sftp = client.open_sftp()
-        try:
-            sftp.put(local_path, remote_path)
-        finally:
-            sftp.close()
+        self._sftp_with_retry(rig, lambda s: s.put(local_path, remote_path))
 
     def upload_string(self, rig: Rig, content: str, remote_path: str):
         """Write a string directly to a remote file."""
-        client = self.get(rig)
-        sftp = client.open_sftp()
-        try:
+        def _write(sftp):
             with sftp.open(remote_path, "w") as f:
                 f.write(content)
-        finally:
-            sftp.close()
+        self._sftp_with_retry(rig, _write)
 
     def download(self, rig: Rig, remote_path: str, local_path: str):
-        client = self.get(rig)
-        sftp = client.open_sftp()
-        try:
-            sftp.get(remote_path, local_path)
-        finally:
-            sftp.close()
+        self._sftp_with_retry(rig, lambda s: s.get(remote_path, local_path))
 
     def exec_parallel(
         self, rigs: list[Rig], command: str, timeout: int = SSH_COMMAND_TIMEOUT

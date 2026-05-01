@@ -1,0 +1,11 @@
+[Unit]
+Description=MeowOS Auto-Updater (one-shot)
+Wants=network-online.target
+After=network-online.target meowos-phonehome.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mfarm/meowos-updater.py
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal

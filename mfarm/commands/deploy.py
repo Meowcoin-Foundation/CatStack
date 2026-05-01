@@ -38,6 +38,23 @@ def deploy_agent(target, disable_hiveos):
     deploy_script = WORKER_DIR / "deploy.sh"
     service_file = WORKER_DIR / "mfarm-agent.service"
     wrapper_file = WORKER_DIR / "miner-wrapper.sh"
+    # Auto-updater bundle — uploaded as a unit; deploy.sh skips the install
+    # block if any of these are missing, so partial pre-updater installs are
+    # still fine.
+    updater_files = [
+        WORKER_DIR / "meowos-updater.py",
+        WORKER_DIR / "meowos-updater.service",
+        WORKER_DIR / "meowos-updater.timer",
+        WORKER_DIR.parent.parent / "VERSION",
+    ]
+    # Phonehome — required for cross-subnet console discovery and the rig
+    # auto-heal feature (console reconciles Rig.host from phonehome MAC).
+    # Deployed independently of the updater bundle so older deploy.sh
+    # installs without the phonehome block still don't barf.
+    phonehome_files = [
+        WORKER_DIR / "meowos-phonehome.py",
+        WORKER_DIR / "meowos-phonehome.service",
+    ]
 
     for f in [agent_file, deploy_script, service_file]:
         if not f.exists():
@@ -58,6 +75,12 @@ def deploy_agent(target, disable_hiveos):
             pool.upload(rig, str(service_file), "/tmp/mfarm-deploy/mfarm-agent.service")
             if wrapper_file.exists():
                 pool.upload(rig, str(wrapper_file), "/tmp/mfarm-deploy/miner-wrapper.sh")
+            for uf in updater_files:
+                if uf.exists():
+                    pool.upload(rig, str(uf), f"/tmp/mfarm-deploy/{uf.name}")
+            for pf in phonehome_files:
+                if pf.exists():
+                    pool.upload(rig, str(pf), f"/tmp/mfarm-deploy/{pf.name}")
 
             # Run deploy script
             env_prefix = ""
