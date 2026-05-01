@@ -91,9 +91,23 @@ def _poll_one(pool, rig: Rig) -> dict | None:
         # Combined probe: connectivity marker + vastai status + mfarm stats.
         # The marker line lets us distinguish "ssh worked, no miner" from
         # "ssh failed entirely" — without it both look like empty stdout.
+        #
+        # The vastai line MUST be exactly one line. The naive `is-active ||
+        # echo missing` pattern produces TWO lines when is-active outputs
+        # "inactive\n" with rc=3 (which is the common case on non-Vast rigs)
+        # — both stdouts get concatenated. Using $(cmd1 || cmd2) doesn't fix
+        # this either because the captured value is still both outputs.
+        # Capture-then-default-via-${VAR:-fallback} gives us exactly one
+        # line: VAR holds whatever is-active wrote (or empty string if it
+        # failed entirely with rc=4 unit-not-found), then ${VAR:-missing}
+        # outputs the value or "missing" if empty.
+        #
+        # Without this, lines[2] starts with "missing\n{...}" instead of
+        # "{...}", the startswith("{") test fails, stats end up an empty
+        # dict, and every mining rig appears IDLE in the dashboard.
         cmd = (
             "echo OK_REACHABLE; "
-            "systemctl is-active vastai 2>/dev/null || echo missing; "
+            "VAST=$(systemctl is-active vastai 2>/dev/null); echo \"${VAST:-missing}\"; "
             "cat /var/run/mfarm/stats.json 2>/dev/null"
         )
         stdout, _, rc = pool.exec(rig, cmd, timeout=5)
