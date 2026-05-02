@@ -1143,14 +1143,45 @@ class MinerManager:
                 binary = miner
         return ["/opt/mfarm/miner-wrapper.sh"]  # wrapper handles all miner types
 
+    @staticmethod
+    def _is_vast_host() -> bool:
+        """Detect whether this rig is also a Vast.ai host.
+
+        True if the vastai daemon's machine_id file exists. We rely on the
+        file rather than `systemctl is-active vastai` because the unit may
+        be transiently down during firstboot or daemon restarts and we want
+        to err on the side of "treat as Vast" so we never compete with a
+        renter for the GPU.
+        """
+        return Path("/var/lib/vastai_kaalia/machine_id").exists()
+
     def start(self) -> bool:
         """Start GPU and CPU miner processes."""
         self._kill_stale_miners(keep_cpu=False)
         self.apply_overclock()
         started = False
 
-        # Start GPU miner
+        # Vast-host guard: refuse to auto-launch a GPU miner on Vast hosts.
+        # Vast rents the GPU to renters; running our own GPU miner would
+        # conflict. CPU mining is safe (Vast doesn't sell CPU) and is
+        # handled separately below via the cpu_flight_sheet path. Operator
+        # opts in to GPU mining on Vast by applying a flight sheet via the
+        # dashboard, which stamps `applied_via_dashboard: true` on the
+        # config so this guard lets it through.
         fs = self.config.flight_sheet
+        if (fs
+                and fs.get("miner", "") not in self.CPU_MINER_BINARIES
+                and self._is_vast_host()
+                and not fs.get("applied_via_dashboard")):
+            log.info(
+                "Vast host detected; not starting GPU miner '%s' from "
+                "default flight sheet '%s'. Apply a flight sheet via the "
+                "dashboard to override.",
+                fs.get("miner") or "?", fs.get("name") or "?",
+            )
+            fs = None
+
+        # Start GPU miner
         if fs and not self.is_running():
             cmd = self.build_command()
             if cmd:

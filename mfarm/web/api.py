@@ -801,6 +801,11 @@ async def apply_flightsheet(fs_name: str, target: str):
                 "extra_args": fs.extra_args, "is_solo": bool(fs.is_solo),
                 "solo_rpc_user": fs.solo_rpc_user, "solo_rpc_pass": fs.solo_rpc_pass,
                 "coinbase_addr": fs.coinbase_addr,
+                # Marker so the agent's Vast-host guard knows this flight
+                # sheet was an explicit operator action (applied via the
+                # dashboard) rather than a default baked into the image.
+                # Vast hosts only auto-run GPU miners when this is set.
+                "applied_via_dashboard": True,
             }
 
             config_json = json.dumps(config, indent=2)
