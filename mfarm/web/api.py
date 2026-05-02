@@ -979,6 +979,69 @@ def delete_oc_profile(name: str):
     return {"status": "deleted"}
 
 
+def _build_oc_script(profile: OcProfile, label: str) -> str:
+    """Render the persistent /opt/mfarm/apply-oc.sh body for `profile`."""
+    s = '#!/bin/bash\nnvidia-smi -pm 1 > /dev/null 2>&1\n'
+    s += '# Try X for nvidia-settings, fall back gracefully\n'
+    s += 'if ! pgrep -x Xorg > /dev/null; then\n'
+    s += '  nohup Xorg :0 -config /etc/X11/xorg.conf > /dev/null 2>&1 &\n  sleep 3\nfi\nexport DISPLAY=:0\n'
+    s += 'GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)\n'
+    s += 'for i in $(seq 0 $((GPU_COUNT-1))); do\n'
+    if profile.core_offset is not None:
+        s += f'  nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={profile.core_offset}" > /dev/null 2>&1 || true\n'
+    if profile.mem_offset is not None:
+        s += f'  nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={profile.mem_offset}" > /dev/null 2>&1 || true\n'
+    if profile.core_lock is not None:
+        s += f'  nvidia-smi -i $i -lgc {profile.core_lock},{profile.core_lock} > /dev/null 2>&1\n'
+    if profile.mem_lock is not None:
+        s += f'  nvidia-smi -i $i -lmc {profile.mem_lock},{profile.mem_lock} > /dev/null 2>&1\n'
+    if profile.power_limit is not None:
+        s += f'  nvidia-smi -i $i -pl {profile.power_limit} > /dev/null 2>&1\n'
+    if profile.fan_speed is not None:
+        s += f'  nvidia-settings -a "[gpu:$i]/GPUFanControlState=1" > /dev/null 2>&1\n'
+        s += f'  nvidia-settings -a "[fan:$i]/GPUTargetFanSpeed={profile.fan_speed}" > /dev/null 2>&1\n'
+    s += 'done\n'
+    s += 'nvidia-smi -pm 1 > /dev/null 2>&1\n'
+    s += f'echo "OC {label} applied at $(date)" >> /var/log/mfarm/oc.log\n'
+    return s
+
+
+async def _push_oc_to_rig(rig: Rig, profile: OcProfile, label: str) -> None:
+    """Upload apply-oc.sh + mfarm-oc.service to `rig` and run apply now.
+
+    Caller is responsible for setting `rig.oc_profile_id` and saving.
+    Raises on any underlying SSH/exec failure.
+    """
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    oc_script = _build_oc_script(profile, label)
+    svc = ('[Unit]\nDescription=MeowFarm GPU Overclock\nAfter=multi-user.target\n'
+           'Wants=mfarm-agent.service\n\n[Service]\nType=oneshot\n'
+           'ExecStart=/opt/mfarm/apply-oc.sh\nRemainAfterExit=yes\n\n'
+           '[Install]\nWantedBy=multi-user.target\n')
+
+    await loop.run_in_executor(
+        _executor, lambda: pool.upload_string(rig, oc_script, "/tmp/apply-oc.sh")
+    )
+    await loop.run_in_executor(
+        _executor, lambda: pool.exec(rig,
+            "sudo cp /tmp/apply-oc.sh /opt/mfarm/apply-oc.sh && sudo chmod +x /opt/mfarm/apply-oc.sh",
+            timeout=5)
+    )
+    await loop.run_in_executor(
+        _executor, lambda: pool.upload_string(rig, svc, "/tmp/mfarm-oc.service")
+    )
+    await loop.run_in_executor(
+        _executor, lambda: pool.exec(rig,
+            "sudo cp /tmp/mfarm-oc.service /etc/systemd/system/mfarm-oc.service && "
+            "sudo systemctl daemon-reload && sudo systemctl enable mfarm-oc.service",
+            timeout=10)
+    )
+    await loop.run_in_executor(
+        _executor, lambda: pool.exec(rig, "sudo bash /opt/mfarm/apply-oc.sh", timeout=30)
+    )
+
+
 @router.post("/oc-profiles/{oc_name}/apply/{target}")
 async def apply_oc_profile(oc_name: str, target: str):
     """Apply OC profile to rig(s) and deploy a persistent boot script."""
@@ -989,66 +1052,129 @@ async def apply_oc_profile(oc_name: str, target: str):
         raise HTTPException(404, f"OC profile '{oc_name}' not found")
 
     rigs = resolve_targets(db, target)
-    pool = get_pool()
-    loop = asyncio.get_event_loop()
     results = {}
-
     for rig in rigs:
         try:
             rig.oc_profile_id = profile.id
             rig.save(db)
-
-            # Build the OC apply script that persists through reboots
-            oc_script = '#!/bin/bash\nnvidia-smi -pm 1 > /dev/null 2>&1\n'
-            oc_script += '# Try X for nvidia-settings, fall back gracefully\n'
-            oc_script += 'if ! pgrep -x Xorg > /dev/null; then\n'
-            oc_script += '  nohup Xorg :0 -config /etc/X11/xorg.conf > /dev/null 2>&1 &\n  sleep 3\nfi\nexport DISPLAY=:0\n'
-            oc_script += 'GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)\n'
-            oc_script += 'for i in $(seq 0 $((GPU_COUNT-1))); do\n'
-            if profile.core_offset is not None:
-                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={profile.core_offset}" > /dev/null 2>&1 || true\n'
-            if profile.mem_offset is not None:
-                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={profile.mem_offset}" > /dev/null 2>&1 || true\n'
-            if profile.core_lock is not None:
-                oc_script += f'  nvidia-smi -i $i -lgc {profile.core_lock},{profile.core_lock} > /dev/null 2>&1\n'
-            if profile.mem_lock is not None:
-                oc_script += f'  nvidia-smi -i $i -lmc {profile.mem_lock},{profile.mem_lock} > /dev/null 2>&1\n'
-            if profile.power_limit is not None:
-                oc_script += f'  nvidia-smi -i $i -pl {profile.power_limit} > /dev/null 2>&1\n'
-            if profile.fan_speed is not None:
-                oc_script += f'  nvidia-settings -a "[gpu:$i]/GPUFanControlState=1" > /dev/null 2>&1\n'
-                oc_script += f'  nvidia-settings -a "[fan:$i]/GPUTargetFanSpeed={profile.fan_speed}" > /dev/null 2>&1\n'
-            oc_script += 'done\n'
-            oc_script += 'nvidia-smi -pm 1 > /dev/null 2>&1\n'
-            oc_script += f'echo "OC {oc_name} applied at $(date)" >> /var/log/mfarm/oc.log\n'
-
-            # Upload OC script to temp, then sudo move it
-            await loop.run_in_executor(
-                _executor, lambda r=rig, s=oc_script: pool.upload_string(r, s, "/tmp/apply-oc.sh")
-            )
-            await loop.run_in_executor(
-                _executor, lambda r=rig: pool.exec(r, "sudo cp /tmp/apply-oc.sh /opt/mfarm/apply-oc.sh && sudo chmod +x /opt/mfarm/apply-oc.sh", timeout=5)
-            )
-
-            # Create systemd service for boot persistence
-            svc = '[Unit]\nDescription=MeowFarm GPU Overclock\nAfter=multi-user.target\nWants=mfarm-agent.service\n\n[Service]\nType=oneshot\nExecStart=/opt/mfarm/apply-oc.sh\nRemainAfterExit=yes\n\n[Install]\nWantedBy=multi-user.target\n'
-            await loop.run_in_executor(
-                _executor, lambda r=rig, s=svc: pool.upload_string(r, s, "/tmp/mfarm-oc.service")
-            )
-            await loop.run_in_executor(
-                _executor, lambda r=rig: pool.exec(r, "sudo cp /tmp/mfarm-oc.service /etc/systemd/system/mfarm-oc.service && sudo systemctl daemon-reload && sudo systemctl enable mfarm-oc.service", timeout=10)
-            )
-
-            # Apply now
-            await loop.run_in_executor(
-                _executor, lambda r=rig: pool.exec(r, "sudo bash /opt/mfarm/apply-oc.sh", timeout=30)
-            )
-
+            await _push_oc_to_rig(rig, profile, oc_name)
             results[rig.name] = "applied (persists on reboot)"
         except Exception as e:
             results[rig.name] = f"error: {e}"
 
     return {"results": results}
+
+
+# ── Inline OC: per-rig apply without a named profile ─────────────────
+# The frontend's "Apply OC" card hits these endpoints directly with
+# raw values. We persist them via a hidden `__inline_<rigname>` profile
+# so the existing apply machinery + boot-time systemd unit work as-is.
+
+class InlineOcBody(BaseModel):
+    core_offset: int | None = None
+    mem_offset: int | None = None
+    core_lock: int | None = None
+    mem_lock: int | None = None
+    power_limit: int | None = None
+    fan_speed: int | None = None
+
+
+def _inline_profile_name(rig_name: str) -> str:
+    return f"__inline_{rig_name}"
+
+
+@router.get("/rigs/{name}/oc")
+def get_rig_oc(name: str):
+    """Return the current OC values for the rig's bound profile (if any)."""
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"rig '{name}' not found")
+    if not rig.oc_profile_id:
+        return {"core_offset": None, "mem_offset": None, "core_lock": None,
+                "mem_lock": None, "power_limit": None, "fan_speed": None,
+                "profile_name": None, "is_inline": False}
+    p = next((q for q in OcProfile.get_all(db) if q.id == rig.oc_profile_id), None)
+    if not p:
+        return {"core_offset": None, "mem_offset": None, "core_lock": None,
+                "mem_lock": None, "power_limit": None, "fan_speed": None,
+                "profile_name": None, "is_inline": False}
+    is_inline = p.name == _inline_profile_name(name)
+    return {
+        "core_offset": p.core_offset, "mem_offset": p.mem_offset,
+        "core_lock": p.core_lock, "mem_lock": p.mem_lock,
+        "power_limit": p.power_limit, "fan_speed": p.fan_speed,
+        "profile_name": None if is_inline else p.name,
+        "is_inline": is_inline,
+    }
+
+
+@router.post("/rigs/{name}/oc")
+async def apply_rig_oc(name: str, body: InlineOcBody):
+    """Apply inline OC values to a single rig.
+
+    Persists the values into a hidden `__inline_<name>` profile, links the
+    rig to it, then runs the same apply pipeline as profile-apply.
+    """
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"rig '{name}' not found")
+
+    pname = _inline_profile_name(name)
+    p = OcProfile.get_by_name(db, pname)
+    if p is None:
+        p = OcProfile(name=pname)
+    p.core_offset = body.core_offset
+    p.mem_offset = body.mem_offset
+    p.core_lock = body.core_lock
+    p.mem_lock = body.mem_lock
+    p.power_limit = body.power_limit
+    p.fan_speed = body.fan_speed
+    p.save(db)
+
+    rig.oc_profile_id = p.id
+    rig.save(db)
+
+    try:
+        await _push_oc_to_rig(rig, p, pname)
+    except Exception as e:
+        raise HTTPException(500, f"apply failed: {e}")
+    return {"status": "applied"}
+
+
+@router.post("/rigs/{name}/oc/reset")
+async def reset_rig_oc(name: str):
+    """Clear OC on a rig: reset clocks/power, disable boot unit, unlink profile."""
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"rig '{name}' not found")
+
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    reset_sh = (
+        'GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l); '
+        'for i in $(seq 0 $((GPU_COUNT-1))); do '
+        '  nvidia-smi -i $i -rgc > /dev/null 2>&1; '
+        '  nvidia-smi -i $i -rmc > /dev/null 2>&1; '
+        '  nvidia-smi -i $i -pl 0 > /dev/null 2>&1 || true; '
+        'done; '
+        'sudo systemctl disable --now mfarm-oc.service 2>/dev/null; '
+        'sudo rm -f /etc/systemd/system/mfarm-oc.service /opt/mfarm/apply-oc.sh; '
+        'sudo systemctl daemon-reload; '
+        'echo "OC reset at $(date)" >> /var/log/mfarm/oc.log'
+    )
+    try:
+        await loop.run_in_executor(
+            _executor, lambda: pool.exec(rig, f"sudo bash -c {shlex.quote(reset_sh)}", timeout=30)
+        )
+    except Exception as e:
+        raise HTTPException(500, f"reset failed: {e}")
+
+    rig.oc_profile_id = None
+    rig.save(db)
+    return {"status": "reset"}
 
 
 def _oc_to_dict(p: OcProfile) -> dict:
