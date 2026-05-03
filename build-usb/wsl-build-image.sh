@@ -102,10 +102,12 @@ network:
       dhcp4-overrides:
         use-dns: true
         send-hostname: true
-    all-other:
-      match: { driver: "*" }
-      dhcp4: true
-      optional: true
+    # NOTE: do NOT add a wildcard `all-other: { driver: "*" }` block here.
+    # systemd-networkd would match Docker's veth interfaces, try to manage
+    # them as DHCP clients, and detach them from docker0 — breaking all
+    # container networking (DNS times out inside containers, breaking
+    # `docker pull`, breaking Vast's `Test docker` install step, etc.).
+    # The all-en + all-eth matchers above already cover every real NIC.
 EOF
 chmod 600 "$MNT/etc/netplan/01-mfarm.yaml"
 

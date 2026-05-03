@@ -219,6 +219,33 @@ if ! dpkg --audit 2>&1 | head -1 | grep -q '^$'; then
     DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
 fi
 
+# Fix the broken netplan that older MeowOS images shipped. The `all-other`
+# block matches `driver: "*"` which catches Docker's veth interfaces;
+# systemd-networkd then "manages" them as standalone DHCP clients and
+# detaches them from docker0, killing container networking. Vast's
+# `Test docker` step then fails with "no servers could be reached" /
+# "registry-1.docker.io network unreachable", install aborts, services
+# never get enabled. Idempotent — does nothing if `all-other` already gone.
+if [[ -f /etc/netplan/01-mfarm.yaml ]] && grep -q 'all-other' /etc/netplan/01-mfarm.yaml; then
+    echo "  patching /etc/netplan/01-mfarm.yaml to drop all-other wildcard"
+    cp /etc/netplan/01-mfarm.yaml /etc/netplan/01-mfarm.yaml.preVast
+    python3 - <<'PY'
+import yaml
+p = "/etc/netplan/01-mfarm.yaml"
+with open(p) as f: cfg = yaml.safe_load(f)
+ethers = cfg.get("network", {}).get("ethernets", {})
+if "all-other" in ethers:
+    del ethers["all-other"]
+    with open(p, "w") as f: yaml.safe_dump(cfg, f, default_flow_style=False)
+PY
+    chmod 600 /etc/netplan/01-mfarm.yaml
+    netplan apply 2>&1 | grep -v Permissions || true
+    sleep 2
+    # docker bridge needs a refresh to pick up the new networking
+    systemctl restart docker 2>/dev/null || true
+    sleep 3
+fi
+
 # ── 6/10  Pre-cache Docker packages ────────────────────────────────────
 # Vast's installer fetches these from download.docker.com mid-install. That CDN
 # has timed out on us repeatedly (174 kB/s, broken PPA mirror). Cache the .debs

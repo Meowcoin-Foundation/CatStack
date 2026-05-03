@@ -107,11 +107,12 @@ network:
       match:
         name: "eth*"
       dhcp4: true
-    all-other:
-      match:
-        driver: "*"
-      dhcp4: true
-      optional: true
+    # NOTE: do NOT add a wildcard `all-other: { driver: "*" }` block here.
+    # systemd-networkd would match Docker's veth interfaces, try to manage
+    # them as DHCP clients, and detach them from docker0 — breaking all
+    # container networking (DNS times out inside containers, breaking
+    # `docker pull`, breaking Vast's `Test docker` install step, etc.).
+    # The all-en + all-eth matchers above already cover every real NIC.
 EOF
 
 rm -f "$MNT/etc/resolv.conf"
@@ -208,6 +209,11 @@ cp "$SRC/mfarm/worker/mfarm-agent.py" "$MNT/opt/mfarm/mfarm-agent.py"
 cp "$SRC/mfarm/worker/miner-wrapper.sh" "$MNT/opt/mfarm/miner-wrapper.sh"
 cp "$SRC/mfarm/worker/mfarm-agent.service" "$MNT/etc/systemd/system/mfarm-agent.service"
 chmod +x "$MNT/opt/mfarm/mfarm-agent.py" "$MNT/opt/mfarm/miner-wrapper.sh"
+
+cp "$SRC/mfarm/worker/xmrig-1gb-hugepages.service" "$MNT/etc/systemd/system/xmrig-1gb-hugepages.service"
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/xmrig-1gb-hugepages.service \
+    "$MNT/etc/systemd/system/multi-user.target.wants/xmrig-1gb-hugepages.service"
 
 cp "$SRC/mfarm/worker/meowos-phonehome.py" "$MNT/opt/mfarm/meowos-phonehome.py"
 cp "$SRC/mfarm/worker/meowos-phonehome.service" "$MNT/etc/systemd/system/meowos-phonehome.service"
