@@ -455,10 +455,29 @@ WantedBy=multi-user.target
 AGENTSVC
     echo "  restored mfarm-agent.service from template"
 fi
+# Deprioritize the agent + xmrig so a Vast renter's docker workload always
+# preempts CPU mining. Children of the service (xmrig) inherit Nice from
+# the parent process and share CPUWeight via cgroup. With these in place:
+#
+#   * Nice=19 — xmrig is "be polite to everyone." Renters at default Nice 0
+#     get scheduled first; xmrig only fills idle cycles.
+#   * CPUWeight=10 (default 100) — under contention, the renter gets ~10x
+#     the CPU share. xmrig still earns whenever the renter isn't CPU-bound.
+#
+# Applied as a drop-in (not in the base mfarm-agent.service) so non-Vast
+# rigs keep normal priority — there's nothing to compete with there, and
+# Nice=19 would needlessly pessimize them.
+mkdir -p /etc/systemd/system/mfarm-agent.service.d
+cat > /etc/systemd/system/mfarm-agent.service.d/vast-deprioritize.conf <<'DEPRIO'
+[Service]
+Nice=19
+CPUWeight=10
+DEPRIO
+
 systemctl unmask mfarm-agent 2>/dev/null  # idempotent: clears any prior install run's mask
 systemctl daemon-reload
 systemctl enable --now mfarm-agent 2>&1 | tail -2
-echo "  mfarm-agent: $(systemctl is-active mfarm-agent) (resumes CPU mining)"
+echo "  mfarm-agent: $(systemctl is-active mfarm-agent) (CPU mining at Nice=19, CPUWeight=10)"
 
 # ── Summary ────────────────────────────────────────────────────────────
 say "DONE"
