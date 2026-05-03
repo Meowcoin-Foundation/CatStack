@@ -76,6 +76,26 @@ header {
   font-weight: 700;
 }
 
+/* Per-algo breakdown inside the GPU Hashrate stat box. When more than one
+   algo is mining across the farm we render one row per algo so totals don't
+   get summed across incomparable work units. */
+.header-stat .value .algo-row {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.header-stat .value .algo-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: lowercase;
+  margin-right: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+
 .header-stat .label {
   color: var(--text-dim);
   font-size: 11px;
@@ -581,14 +601,22 @@ function renderDashboard(rigs) {
   }
   noRigs.style.display = 'none';
 
-  // Totals
-  let online = 0, totalHr = 0, totalCpuHr = 0, totalGpuPwr = 0, totalCpuPwr = 0, totalAcc = 0;
+  // Totals — sum GPU hashrate per-algo. Different algos have different work
+  // units (xelishashv3 H/s vs yescryptR32 H/s vs equihash Sol/s), so summing
+  // them into one number is meaningless. Group by algo, then render each.
+  let online = 0, totalCpuHr = 0, totalGpuPwr = 0, totalCpuPwr = 0, totalAcc = 0;
+  const algoTotals = {};  // {algo: hashrate_sum}
   rigs.forEach(r => {
     if (r.online && r.stats) {
       online++;
       const m = r.stats.miner || {};
       const cm = r.stats.cpu_miner || {};
-      totalHr += m.hashrate || 0;
+      const hr = m.hashrate || 0;
+      if (hr > 0) {
+        // Fall back to miner name when algo is empty (rigel reports algo="")
+        const algo = m.algo || m.name || 'unknown';
+        algoTotals[algo] = (algoTotals[algo] || 0) + hr;
+      }
       totalAcc += (m.accepted || 0) + (cm.accepted || 0);
       (r.stats.gpus || []).forEach(g => totalGpuPwr += g.power_draw || 0);
       totalCpuPwr += (r.stats.cpu || {}).power_draw || 0;
@@ -597,7 +625,19 @@ function renderDashboard(rigs) {
   });
 
   document.getElementById('total-rigs').textContent = `${online}/${rigs.length}`;
-  document.getElementById('total-hashrate').textContent = fmtHash(totalHr);
+  // Render GPU hashrate broken down by algo. Single algo → plain number for
+  // backward compatibility; multiple → stacked one-line-per-algo.
+  const totalHashEl = document.getElementById('total-hashrate');
+  const algoEntries = Object.entries(algoTotals).sort((a, b) => b[1] - a[1]);
+  if (algoEntries.length === 0) {
+    totalHashEl.textContent = '-';
+  } else if (algoEntries.length === 1) {
+    totalHashEl.textContent = fmtHash(algoEntries[0][1]);
+  } else {
+    totalHashEl.innerHTML = algoEntries
+      .map(([algo, hr]) => `<div class="algo-row"><span class="algo-tag">${algo}</span>${fmtHash(hr)}</div>`)
+      .join('');
+  }
   document.getElementById('total-cpu-hashrate').textContent = fmtHash(totalCpuHr);
   document.getElementById('total-gpu-power').textContent = totalGpuPwr ? `${totalGpuPwr.toFixed(0)}W` : '-';
   document.getElementById('total-cpu-power').textContent = totalCpuPwr ? `${totalCpuPwr.toFixed(0)}W` : '-';
