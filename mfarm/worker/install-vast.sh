@@ -149,13 +149,22 @@ else
     echo "  partition already covers full disk ($FREE_GB GiB free unallocated)"
 fi
 
-# ── 3/10  Mask conflicting MeowOS / apt services ───────────────────────
-say "3/10  mask services that fight the install"
-# `disable` does NOT survive a reboot for these — must MASK. If unit file is
-# in /etc/systemd/system/ (admin-installed), `mask` fails until file removed.
+# ── 3/10  Mask / pause conflicting services ───────────────────────────
+say "3/10  pause CPU miner, mask competitors"
+# Two categories:
+#   KILL_SVCS — masked permanently because they fight the install OR run
+#     duplicate workloads (meowos-xmrig is a redundant standalone xmrig that
+#     would compete with mfarm-agent's flight-sheet-managed xmrig).
+#   PAUSE_SVCS — stopped during install, RESTORED at step 10. This preserves
+#     CPU mining (xmrig via mfarm-agent) on Vast hosts: user wants xmrig
+#     running even during Vast rentals so CPU isn't idle, but during the
+#     install itself it would steal cores from `apt-get install` and `docker
+#     pull` — so we suspend it for the install duration only.
+# `disable` does NOT survive a reboot for masked services — must MASK. If
+# unit file is in /etc/systemd/system/ (admin-installed), `mask` fails
+# until the unit file is removed.
 KILL_SVCS=(
     meowos-xmrig
-    mfarm-agent
     meowos-phonehome
     meowos-webui
     apt-daily.timer
@@ -163,6 +172,9 @@ KILL_SVCS=(
     apt-daily.service
     apt-daily-upgrade.service
     unattended-upgrades.service
+)
+PAUSE_SVCS=(
+    mfarm-agent
 )
 for svc in "${KILL_SVCS[@]}"; do
     systemctl stop "$svc" 2>/dev/null
@@ -174,8 +186,12 @@ systemctl daemon-reload
 for svc in "${KILL_SVCS[@]}"; do
     systemctl mask "$svc" >/dev/null 2>&1
 done
+for svc in "${PAUSE_SVCS[@]}"; do
+    systemctl stop "$svc" 2>/dev/null || true
+done
 pkill -9 xmrig 2>/dev/null || true
 echo "  masked: ${KILL_SVCS[*]}"
+echo "  paused (will restore at step 10): ${PAUSE_SVCS[*]}"
 
 # ── 4/10  Preserve env across sudo (kills conffile prompts) ────────────
 say "4/10  /etc/sudoers.d/99-preserve-frontend"
@@ -409,6 +425,40 @@ echo "  installed vastai drop-in to disable skip_bwtest (enables verification se
 # waiting for the next cron-scheduled push (which can be ~1h away).
 sudo -u vastai_kaalia bash -c 'cd /var/lib/vastai_kaalia && python3 send_mach_info.py' 2>&1 \
     | tail -1
+
+# Restore mfarm-agent so xmrig (CPU mining per the rig's flight sheet) keeps
+# running even during Vast rentals. CPU work doesn't compete with the
+# renter's GPU workload, so we want it earning continuously. If the unit
+# file is missing (legacy state from earlier install-vast.sh runs that
+# rm'd it), recreate it from the canonical template.
+if [[ ! -f /etc/systemd/system/mfarm-agent.service ]]; then
+    cat > /etc/systemd/system/mfarm-agent.service <<'AGENTSVC'
+[Unit]
+Description=MeowFarm Mining Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python3 /opt/mfarm/mfarm-agent.py
+Restart=always
+RestartSec=10
+WatchdogSec=120
+WorkingDirectory=/opt/mfarm
+StandardOutput=append:/var/log/mfarm/agent.log
+StandardError=append:/var/log/mfarm/agent.log
+OOMScoreAdjust=-900
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+AGENTSVC
+    echo "  restored mfarm-agent.service from template"
+fi
+systemctl unmask mfarm-agent 2>/dev/null  # idempotent: clears any prior install run's mask
+systemctl daemon-reload
+systemctl enable --now mfarm-agent 2>&1 | tail -2
+echo "  mfarm-agent: $(systemctl is-active mfarm-agent) (resumes CPU mining)"
 
 # ── Summary ────────────────────────────────────────────────────────────
 say "DONE"
