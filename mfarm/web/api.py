@@ -1714,7 +1714,7 @@ _AGENT_BUNDLE_FILES = {
     "etc/systemd/system/meowos-updater.service":      _WORKER_DIR / "meowos-updater.service",
     "etc/systemd/system/meowos-updater.timer":        _WORKER_DIR / "meowos-updater.timer",
     "etc/systemd/system/xmrig-1gb-hugepages.service": _WORKER_DIR / "xmrig-1gb-hugepages.service",
-    "etc/profile.d/miner-attach.sh":       _WORKER_DIR / "miner-attach.sh",
+    "usr/local/bin/miner":                 _WORKER_DIR / "miner-attach.sh",
     # VERSION must come last — the rig uses its presence as the "extract OK"
     # marker before installing anything.
     "opt/mfarm/VERSION":                   _VERSION_FILE,

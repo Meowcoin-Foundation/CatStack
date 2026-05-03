@@ -57,17 +57,23 @@ if [[ -f /tmp/mfarm-deploy/miner-wrapper.sh ]]; then
     chmod +x "$INSTALL_DIR/miner-wrapper.sh"
 fi
 
-# 4b. Install `miner` shell function (system-wide profile.d) so SSH'ing in and
-# typing `miner` shows the running miner output, plus `miner start|stop|restart`
-# control. Sourced by both interactive and login bash. Idempotent.
+# 4b. Install `miner` smart-attach script as a real executable at
+# /usr/local/bin/miner — works in ALL shells (interactive, non-interactive
+# `bash -c`, scripts), and is smart enough to detect the actively-running
+# miner (rigel, SRBMiner, ccminer, xmrig, ...) and tail its log.
+#
+# Replaces the older approach of (a) a dumb 2-line `tail /var/log/mfarm/miner.log`
+# binary at /usr/local/bin/miner that didn't know about non-mfarm miners, and
+# (b) a /etc/profile.d/miner-attach.sh shell function that only loaded in
+# login shells. Removes both legacy artifacts to avoid PATH/precedence
+# confusion.
 if [[ -f /tmp/mfarm-deploy/miner-attach.sh ]]; then
-    cp /tmp/mfarm-deploy/miner-attach.sh /etc/profile.d/miner-attach.sh
-    chmod 644 /etc/profile.d/miner-attach.sh
-    # Defensive: some bashrc setups skip /etc/profile.d when invoked as
-    # non-login shells. Source it from /root/.bashrc explicitly too.
-    if ! grep -q miner-attach /root/.bashrc 2>/dev/null; then
-        echo '. /etc/profile.d/miner-attach.sh' >> /root/.bashrc
-    fi
+    cp /tmp/mfarm-deploy/miner-attach.sh /usr/local/bin/miner
+    chmod 755 /usr/local/bin/miner
+    # Clean up the legacy profile.d function + .bashrc source line — not
+    # needed any more and would shadow the binary in interactive shells.
+    rm -f /etc/profile.d/miner-attach.sh
+    sed -i '/miner-attach/d' /root/.bashrc 2>/dev/null || true
 fi
 
 # 5. Install systemd service
