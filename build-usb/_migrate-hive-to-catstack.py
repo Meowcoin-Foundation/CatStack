@@ -41,8 +41,10 @@ FLIGHT_SHEET = sys.argv[3] if len(sys.argv) > 3 else "XTM_Working"
 CATSTACK_API = "http://192.168.68.78:8888"
 KEY_PATH = os.path.expanduser("~/.ssh/id_ed25519")
 IMG_PATH = r"C:\Source\meowos.img"
-HIVEOS_USER = "user"
-HIVEOS_PASS = "1"
+# Override via env: HIVEOS_USER=root HIVEOS_PASS= python migrate.py ... -> key auth
+# Default is HiveOS standard user/1.
+HIVEOS_USER = os.environ.get("HIVEOS_USER", "user")
+HIVEOS_PASS = os.environ.get("HIVEOS_PASS", "1") if os.environ.get("HIVEOS_PASS", "1") else None
 MFARM_USER = "miner"
 MFARM_PASS = "mfarm"
 
@@ -248,14 +250,25 @@ def step_dd_flash() -> None:
     print(f"nc binary: {nc_path}")
 
     # 1. Quiesce HiveOS. Frees RAM (xmrig hugepages release) and stops
-    # services that might trigger disk reads while dd is running.
-    print("\nstep 1: quiesce HiveOS services + miners...")
+    # services that might trigger disk reads while dd is running. Note:
+    # `pkill -f` is case-sensitive by default, so we use `-i` to also
+    # match SRBMiner-MULTI / Rigel / other capitalized miner names that
+    # rigs like HiveOcto01 run alongside HiveOS's miner-run.
+    print("\nstep 1: quiesce HiveOS services + miners + any stale relay state...")
     _, stdout, _ = c.exec_command(
         "sudo -n bash -c '"
         "systemctl stop hive hive-watchdog hive-console hive-ttyd hive-flash 2>/dev/null; "
-        "pkill -KILL -f xmrig 2>/dev/null; "
-        "pkill -KILL -f miner 2>/dev/null; "
+        "pkill -KILL -if xmrig 2>/dev/null; "
+        "pkill -KILL -if miner 2>/dev/null; "
+        "pkill -KILL -if rigel 2>/dev/null; "
+        "pkill -KILL -if srbminer 2>/dev/null; "
         "pkill -KILL SCREEN 2>/dev/null; "
+        # Stale relay state from a prior failed flash attempt would hold port
+        # 9999 and block our new launch — clear it.
+        "pkill -KILL -f /dev/shm/relay.sh 2>/dev/null; "
+        "pkill -KILL -f /dev/shm/dd.pipe 2>/dev/null; "
+        "pkill -KILL -if nc.openbsd 2>/dev/null; "
+        "rm -f /dev/shm/relay.sh /dev/shm/dd.log /dev/shm/dd.pipe 2>/dev/null; "
         "sleep 2; sync; "
         "echo 3 > /proc/sys/vm/drop_caches; "
         "echo quiesced'", timeout=30)
