@@ -72,6 +72,11 @@ class SSHConnectionPool:
             "port": rig.ssh_port,
             "username": rig.ssh_user,
             "timeout": SSH_CONNECT_TIMEOUT,
+            # banner_timeout + auth_timeout bound the post-TCP-handshake phases;
+            # without these, a misbehaving sshd can leave us blocked beyond
+            # the `timeout` ceiling (which only covers TCP connect).
+            "banner_timeout": SSH_CONNECT_TIMEOUT,
+            "auth_timeout": SSH_CONNECT_TIMEOUT,
             "allow_agent": True,
             "look_for_keys": True,
         }
@@ -81,7 +86,10 @@ class SSHConnectionPool:
 
         client.connect(**connect_kwargs)
 
-        # Enable keepalive at the transport level too
+        # Enable keepalive at the transport level — paramiko's keepalive
+        # sends SSH_MSG_IGNORE periodically; the OS's TCP layer will RST
+        # the connection if the peer stops responding, which `is_active()`
+        # then surfaces as False so we drop the dead client from the pool.
         transport = client.get_transport()
         if transport:
             transport.set_keepalive(SSH_KEEPALIVE_INTERVAL)
@@ -108,29 +116,100 @@ class SSHConnectionPool:
             self._clients[rig.name] = client
         return client
 
-    def exec(
-        self, rig: Rig, command: str, timeout: int = SSH_COMMAND_TIMEOUT
-    ) -> tuple[str, str, int]:
+    def _exec_once(self, rig: Rig, command: str, timeout: int) -> tuple[str, str, int]:
+        """Single-attempt exec with proper channel-level deadline.
+
+        paramiko's `exec_command(timeout=N)` ONLY bounds the channel-open
+        round-trip — `recv_exit_status()` and the subsequent `read()` calls
+        on stdout/stderr have NO timeout by default and will block forever
+        on a TCP-half-open connection (peer dropped without RST: NAT timeout,
+        firewall blackhole, peer kernel panic, …). We set a deadline on the
+        channel itself so paramiko's recv loop wakes up and raises
+        socket.timeout instead of blocking the worker thread indefinitely.
+        """
         client = self.get(rig)
         try:
             stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+            # Bound every subsequent recv on this channel.
+            stdout.channel.settimeout(timeout)
             rc = stdout.channel.recv_exit_status()
-            return stdout.read().decode("utf-8", errors="replace"), \
-                   stderr.read().decode("utf-8", errors="replace"), rc
+            return (
+                stdout.read().decode("utf-8", errors="replace"),
+                stderr.read().decode("utf-8", errors="replace"),
+                rc,
+            )
         except Exception:
-            # Connection might be dead, remove from pool and retry once
+            # Drop the (probably-dead) connection so the next call gets a
+            # fresh one. Don't retry inline here — the caller's wall-clock
+            # budget is shared, so retry decisions are made one level up.
             with self._lock:
                 self._clients.pop(rig.name, None)
             try:
                 client.close()
             except Exception:
                 pass
-            # Retry with fresh connection
-            client = self.get(rig)
-            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-            rc = stdout.channel.recv_exit_status()
-            return stdout.read().decode("utf-8", errors="replace"), \
-                   stderr.read().decode("utf-8", errors="replace"), rc
+            raise
+
+    def exec(
+        self, rig: Rig, command: str, timeout: int = SSH_COMMAND_TIMEOUT
+    ) -> tuple[str, str, int]:
+        """Execute a command on a rig with TWO defenses against pool wedges:
+
+        1. The inner `_exec_once` sets a channel-level deadline so paramiko's
+           own recv loop is bounded.
+        2. A wall-clock watchdog thread joins the SSH thread for at most
+           `timeout + WATCHDOG_GRACE` seconds. If the SSH call hasn't returned
+           by then (paramiko ignored its timeout, an SFTP op stuck below
+           paramiko's surface, etc.), we forcibly close the SSH client so the
+           OS-level socket goes away. The orphan paramiko thread will observe
+           the closed socket and die on its own; this method returns to the
+           caller, freeing the executor worker.
+
+        Without (2), a single half-dead rig connection could hold every worker
+        in the pool indefinitely (observed: 2026-05-03 — paramiko pool
+        wedged for hours, dashboard showed all rigs offline).
+        """
+        WATCHDOG_GRACE = 5  # seconds beyond the requested timeout
+        result_box: dict = {}
+
+        def _runner():
+            try:
+                result_box["ok"] = self._exec_once(rig, command, timeout)
+            except Exception as e:
+                result_box["err"] = e
+
+        t = threading.Thread(target=_runner, daemon=True, name=f"ssh-exec-{rig.name}")
+        t.start()
+        t.join(timeout=timeout + WATCHDOG_GRACE)
+        if t.is_alive():
+            # Wall-clock timeout — paramiko's own deadline didn't fire. Force
+            # the connection closed; the orphan thread will eventually unwind.
+            with self._lock:
+                client = self._clients.pop(rig.name, None)
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            log.warning(
+                "ssh exec wall-clock timeout (>%ds) on %s; connection forcibly dropped",
+                timeout + WATCHDOG_GRACE, rig.name,
+            )
+            raise TimeoutError(
+                f"SSH exec exceeded {timeout + WATCHDOG_GRACE}s on {rig.name}; "
+                f"pool dropped to recover. command={command!r:.80}"
+            )
+
+        if "err" in result_box:
+            # First attempt failed (connection was probably stale). Retry ONCE
+            # with a fresh connection; the pool already dropped it in _exec_once.
+            try:
+                return self._exec_once(rig, command, timeout)
+            except Exception as e:
+                # Final fall-through: re-raise with original chain visible.
+                raise e from result_box["err"]
+
+        return result_box["ok"]
 
     def exec_stream(self, rig: Rig, command: str):
         """Execute a command and stream stdout to console in real-time."""
