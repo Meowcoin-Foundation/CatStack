@@ -1,7 +1,15 @@
-"""Registry of supported miners and their CLI flag mappings."""
+"""Registry of supported miners and their CLI flag mappings.
+
+The `supported_algos` list per miner is a FALLBACK only — used when live
+discovery hasn't yet succeeded. Authoritative algorithm lists are derived
+from the binary itself via `--list-algorithms` (or equivalent), parsed by
+`parse_algo_output()` below, and cached server-side. See `discover_algos()`
+in mfarm/web/api.py.
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -10,15 +18,58 @@ class MinerDefinition:
     name: str
     display_name: str
     binary_name: str
-    supported_algos: list[str]
-    gpu_type: str  # "nvidia", "amd", "cpu", "any"
-    api_type: str  # "ccminer_tcp", "trex_http", "lolminer_http", "xmrig_http"
+    supported_algos: list[str]      # fallback; live discovery preferred
+    gpu_type: str                    # "nvidia", "amd", "cpu", "any"
+    api_type: str                    # "ccminer_tcp", "trex_http", ...
     default_api_port: int
     supports_solo: bool = False
+
+    # Live algorithm discovery. argv is appended after the binary path.
+    # use_pty=True wraps in `script -qc ... /dev/null` (SRBMiner needs a TTY
+    # or it falls into "Guided setup" interactive mode).
+    algo_query_argv: list[str] | None = None
+    algo_query_use_pty: bool = False
 
     @property
     def default_install_path(self) -> str:
         return f"/opt/mfarm/miners/{self.binary_name}"
+
+
+# ── Algorithm-list output parsers ───────────────────────────────────
+# Each parser takes the raw stdout of the miner's --list-algorithms (or
+# equivalent) command and returns a sorted, deduped list of algo names.
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub('', s)
+
+
+def _parse_srbminer(raw: str) -> list[str]:
+    # Lines like: "[0.85%]   [ C  A  N  - ]   yescryptr32"
+    out = set()
+    for line in raw.splitlines():
+        line = _strip_ansi(line).strip()
+        m = re.match(r'\[\s*[\d.]+%\]\s+\[[^\]]+\]\s+(\S+)', line)
+        if m:
+            out.add(m.group(1))
+    return sorted(out)
+
+
+# Parser dispatch by miner name. Add entries here as discovery for each
+# miner is implemented + tested. Miners not in this table fall back to the
+# hardcoded supported_algos list.
+ALGO_PARSERS = {
+    "srbminer": _parse_srbminer,
+}
+
+
+def parse_algo_output(miner_name: str, raw: str) -> list[str]:
+    parser = ALGO_PARSERS.get(miner_name.lower())
+    if not parser:
+        return []
+    return parser(raw)
 
 
 # ── Built-in miner definitions ──────────────────────────────────────
@@ -160,6 +211,8 @@ _register(MinerDefinition(
     name="srbminer",
     display_name="SRBMiner-Multi",
     binary_name="SRBMiner-Multi",
+    # FALLBACK only — discovered list from --list-algorithms is preferred.
+    # Kept here so the dropdown isn't empty if no rig is online for discovery.
     supported_algos=[
         "randomx", "rx/0", "rx/wow", "rx/arq",
         "ethash", "etchash", "autolykos2",
@@ -167,11 +220,16 @@ _register(MinerDefinition(
         "ghostrider", "dynamo", "yespower",
         "verthash", "heavyhash", "karlsenhash",
         "pyrinhash", "sha512_256d_radiant",
+        "yescrypt", "yescryptr8", "yescryptr16", "yescryptr32",
     ],
     gpu_type="any",
     api_type="srbminer_http",
     default_api_port=21550,
     supports_solo=False,
+    # Discovery: SRBMiner needs a PTY or it drops into "Guided setup".
+    # `script -qc '<binary> --list-algorithms' /dev/null` is the wrapper.
+    algo_query_argv=["--list-algorithms"],
+    algo_query_use_pty=True,
 ))
 
 

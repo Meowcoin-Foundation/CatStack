@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 from mfarm.db.connection import get_db
 from mfarm.db.models import Rig, FlightSheet, OcProfile, Group
 from mfarm.ssh.pool import get_pool
-from mfarm.miners.registry import list_miners
+from mfarm.miners.registry import list_miners, get_miner, parse_algo_output
 
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=5)
@@ -1379,12 +1379,88 @@ def get_groups():
 
 # ── Miners ───────────────────────────────────────────────────────────
 
+# In-memory cache of algorithm lists discovered from real miner binaries on
+# rigs. Keyed by miner name; value is (sorted_algo_list, expiry_unix_ts).
+# TTL is 1 hour — long enough to avoid hammering rigs, short enough that
+# a binary update is reflected within an hour without a server restart.
+_DISCOVERED_ALGOS: dict[str, tuple[list[str], float]] = {}
+_DISCOVERY_TTL_SEC = 3600
+
+
+async def _discover_algos_for_miner(miner) -> list[str] | None:
+    """Run miner --list-algorithms on an online rig and parse output.
+
+    Returns the discovered list, or None if discovery couldn't complete
+    (no online rig with the binary, command failed, or no parser registered).
+    """
+    if not miner.algo_query_argv:
+        return None  # discovery not implemented for this miner
+    db = get_db()
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    bin_path = miner.default_install_path
+    args_str = " ".join(shlex.quote(a) for a in miner.algo_query_argv)
+    if miner.algo_query_use_pty:
+        # SRBMiner falls into "Guided setup" without a TTY; wrap in `script`.
+        cmd = f"script -qc {shlex.quote(f'{bin_path} {args_str}')} /dev/null < /dev/null"
+    else:
+        cmd = f"{shlex.quote(bin_path)} {args_str}"
+    cmd_wrapped = f"bash -lc {shlex.quote(cmd)}"
+
+    # Try each rig in inventory until one succeeds.
+    for rig in Rig.get_all(db):
+        try:
+            stdout, stderr, rc = await loop.run_in_executor(
+                _executor, lambda r=rig: pool.exec(r, cmd_wrapped, timeout=10)
+            )
+        except Exception as e:
+            logging.debug("algo discovery failed on %s: %s", rig.name, e)
+            continue
+        if rc != 0 and not stdout:
+            continue
+        algos = parse_algo_output(miner.name, stdout)
+        if algos:
+            logging.info("Discovered %d algos for %s from rig %s",
+                         len(algos), miner.name, rig.name)
+            return algos
+    return None
+
+
+async def _algos_for(miner) -> list[str]:
+    """Cached + live-discovered algos with hardcoded fallback."""
+    now = _time.time()
+    cached = _DISCOVERED_ALGOS.get(miner.name)
+    if cached and cached[1] > now:
+        return cached[0]
+    discovered = await _discover_algos_for_miner(miner)
+    if discovered:
+        _DISCOVERED_ALGOS[miner.name] = (discovered, now + _DISCOVERY_TTL_SEC)
+        return discovered
+    # Fallback: hardcoded list (last resort if no rig is online with the binary).
+    return miner.supported_algos
+
+
 @router.get("/miners")
-def get_miners():
-    return [{"name": m.name, "display_name": m.display_name,
-             "gpu_type": m.gpu_type, "algos": m.supported_algos,
-             "supports_solo": m.supports_solo}
-            for m in list_miners()]
+async def get_miners():
+    out = []
+    for m in list_miners():
+        algos = await _algos_for(m)
+        out.append({"name": m.name, "display_name": m.display_name,
+                    "gpu_type": m.gpu_type, "algos": algos,
+                    "supports_solo": m.supports_solo})
+    return out
+
+
+@router.post("/miners/refresh")
+async def refresh_miner_algos():
+    """Force re-discovery of algorithm lists for all miners."""
+    _DISCOVERED_ALGOS.clear()
+    out = []
+    for m in list_miners():
+        algos = await _algos_for(m)
+        out.append({"name": m.name, "discovered": len(algos),
+                    "from_binary": m.name in _DISCOVERED_ALGOS})
+    return out
 
 
 @router.post("/rigs/{name}/update-miners")
