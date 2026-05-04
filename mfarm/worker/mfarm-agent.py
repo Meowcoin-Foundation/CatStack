@@ -708,6 +708,49 @@ def query_rigel_api(port: int) -> dict | None:
         return None
 
 
+def query_srbminer_api(port: int) -> dict | None:
+    """Query SRBMiner-MULTI via its HTTP JSON API on /."""
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.read().decode())
+        conn.close()
+
+        algos = data.get("algorithms") or []
+        if not algos:
+            return None
+        a = algos[0]
+
+        gpu_hr = ((a.get("hashrate") or {}).get("gpu") or {})
+        gpu_stats = []
+        for k, v in gpu_hr.items():
+            if k.startswith("gpu") and k != "total":
+                try:
+                    gpu_stats.append({"gpu_id": int(k[3:]), "hashrate": float(v or 0)})
+                except (ValueError, TypeError):
+                    continue
+        gpu_stats.sort(key=lambda g: g["gpu_id"])
+
+        total = float(gpu_hr.get("total") or sum(g["hashrate"] for g in gpu_stats))
+        shares = a.get("shares") or {}
+
+        return {
+            "hashrate": total,
+            "accepted": int(shares.get("accepted", 0) or 0),
+            "rejected": int(shares.get("rejected", 0) or 0),
+            "algo": a.get("name", ""),
+            "uptime_secs": int(data.get("mining_time", 0) or 0),
+            "hashrate_units": "H/s",
+            "gpu_stats": gpu_stats,
+            "version": data.get("miner_version", ""),
+        }
+    except Exception:
+        return None
+
+
 API_PARSERS = {
     "ccminer_tcp": query_ccminer_api,
     "trex_http": query_trex_api,
@@ -716,6 +759,7 @@ API_PARSERS = {
     "miniz_http": query_miniz_api,
     "rigel_http": query_rigel_api,
     "kerrigan_log": query_kerrigan_log,
+    "srbminer_http": query_srbminer_api,
 }
 
 # Miner name to API type mapping
@@ -731,6 +775,7 @@ MINER_API_TYPES = {
     "miniZ": "miniz_http",
     "rigel": "rigel_http",
     "kerrigan": "kerrigan_log",
+    "srbminer": "srbminer_http",
 }
 
 
@@ -930,6 +975,9 @@ class MinerManager:
                     if f.name.lower() == miner.lower() and f.is_file():
                         binary = str(f)
                         break
+            # SRBMiner installs outside /opt/mfarm/miners
+            if not binary and miner == "srbminer" and Path("/opt/srbminer/SRBMiner-MULTI").is_file():
+                binary = "/opt/srbminer/SRBMiner-MULTI"
             if not binary:
                 binary = miner  # fallback to bare name (PATH lookup)
 
@@ -987,6 +1035,14 @@ class MinerManager:
             wallet_worker = f"{wallet}.{worker}"
             cmd = [binary, "-a", algo, "-o", pool, "-u", wallet_worker,
                    "-p", password, "--api-bind", f"0.0.0.0:{port}"]
+
+        elif miner == "srbminer":
+            # SRBMiner takes WALLET and WORKER as separate flags, not the
+            # WALLET.WORKER stratum-username form that ccminer/trex expect.
+            cmd = [binary, "--algorithm", algo, "--pool", pool,
+                   "--wallet", wallet, "--worker", worker,
+                   "--password", password,
+                   "--api-enable", "--api-port", str(port)]
 
         elif miner == "kerrigan":
             # Kerrigan's launcher is multi_gpu.sh <wallet> <worker> <host> <port>.
