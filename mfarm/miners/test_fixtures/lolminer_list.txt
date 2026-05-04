@@ -1,0 +1,55 @@
+[1m[38;2;100;149;237m+---------------------------------------------------------+
+[0m[1m[38;2;100;149;237m|[0m   _       _ __  __ _                   _    ___  ____   [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m  | | ___ | |  \/  (_)_ __   ___ _ __  / |  / _ \|___ \  [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m  | |/ _ \| | |\/| | | '_ \ / _ \ '__| | | | (_) | __) | [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m  | | (_) | | |  | | | | | |  __/ |    | |_ \__, |/ __/  [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m  |_|\___/|_|_|  |_|_|_| |_|\___|_|    |_(_)  /_/|_____| [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m                                                         [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              This software is for mining                [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Autolykos V2                               [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Ethash, Etchash                            [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Equihash 144/5, 192/7, 210/9               [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Fishhash                                   [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              BeamHash III                               [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              NexaPow                                    [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Flux (ZelHash)                             [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Heavyhash-Karlsen                          [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Heavyhash-Pyrin                            [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Blake3-Alephium                            [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Cuck(ar)oo 29                              [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Cuckaroo   30 CTX                          [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m              Cuckatoo   31/32                           [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m                                                         [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m                                                         [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m|[0m             Made by Lolliedieb, November 2024           [1m[38;2;100;149;237m|
+[0m[1m[38;2;100;149;237m+---------------------------------------------------------+
+[0mList of supported algorithms: 
+
+Parameter        Algorithm               Fee %   Needs / Supports --pers   
+ALEPH            Blake3-Alephium         0.75    false                     
+AUTOLYKOS2       Autolykos V2 (Ergo)     1.5     false                     
+BEAM-III         BeamHash III            1.0     false                     
+C29AE            Cuckoo 29               2.0     false                     
+C30CTX           Cuckaroo 30 CTXC        2.5     false                     
+C31              Cuckatoo 31             2.0     false                     
+C32              Cuckatoo 32             2.0     false                     
+CR29-32          Cuckaroo 29-32          1.0     false                     
+CR29-40          Cuckaroo 29-40          1.0     false                     
+EQUI144_5        Equihash 144/5          1.0     true                      
+EQUI144_5_EXCC   Equihash 144/5 (EXCC)   1.0     false                     
+EQUI192_7        Equihash 192/7          1.0     true                      
+EQUI210_9        Equihash 210/9          1.0     false                     
+ETCHASH          Etchash                 0.7     false                     
+ETHASH           Ethash                  0.7     false                     
+ETHASHB3         EthashB3                1.0     false                     
+FISHHASH         FishHash                1.0     false                     
+FLUX             ZelHash                 1.5     false                     
+GRAM             SHA256-GRAM             1.0     false                     
+KARLSEN          HeavyHash-Karlsen       1.0     false                     
+KARLSENV2        Karlsenhash V2          1.0     false                     
+NEXA             NexaPoW                 2.0     false                     
+OCTOPUS          Octopus                 2.0     false                     
+PYRIN            HeavyHash-Pyrin         1.0     false                     
+PYRINV2          HeavyHash-Pyrin V2      1.0     false                     
+RADIANT          Sha512/256D             0.75    false                     
+UBQHASH          Ubqhash                 0.7     false                     

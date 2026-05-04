@@ -1,0 +1,142 @@
+[01;31m  miniZ v2.5e3: [01;35mfast and friendly equihashminer
+[01;34m
+------------------------------------------- Start Help ------------------------------------------[01;36m
+ General information: 
+[0m  [01;33m--[00;32mversion       [0m([01;33m-[00;32mv  [0m)[0m      Print miniZ version information.
+  [01;33m--[00;32mhelp          [0m([01;33m-[00;32mh  [0m)[0m      Print this help on screen and quit.
+  [01;33m--[00;32mcuda-info     [0m([01;33m-[00;32mci [0m)[0m      List all available CUDA devices (GPUs) information on screen.
+[01;36m
+ Device options: 
+[0m  [01;33m--[00;32mnvidia                [0m    Only use NVIDIA GPUs.
+  [01;33m--[00;32mamd                   [0m    Only use AMD GPUs.
+  [01;33m--[00;32mcuda-devices [22;31m[[22;33mdevices[22;31m] [0m   Enable CUDA mining on specific devices, separated by spaces.
+      [01;33m-[00;32mcd [22;31m[[22;33mdevices[22;31m] [0m
+  [01;33m--[00;32mcuda-exclude [22;31m[[22;33mdevices[22;31m] [0m   Include all devices except the ones specified, space separated.
+      [01;33m-[00;32mcde [22;31m[[22;33mdevices[22;31m] [0m
+  [01;33m--[00;32mtempunits=[22;31m[[22;33mTemp. unit[22;31m] [0m   Shows temperature in Celsius (C) or Fahrenheit (F).
+  [01;33m--[00;32mtemplimit=[22;31m[[22;33mTemp. value[22;31m] [0m  Temperature limit at which mining will suspend for one minute.
+                                 You can specify temperature in Celsius (C) or Fahrenheit (F).[01;36m
+ Mining pool connection options: 
+[0m  [01;33m--[00;32muser=[22;31m[[22;33musername[22;31m] [0m          Mining pool username/wallet ([22;31mDEPRECATED[0m).
+      [01;33m-[00;32mu [22;31m[[22;33musername[22;31m] [0m
+  [01;33m--[00;32mworker=[22;31m[[22;33mworker[22;31m] [0m          Alternative way to specify worker.
+  [01;33m--[00;32mserver=[22;31m[[22;33m[ssl://]server[22;31m] [0m  Server address, usually pool address ([22;31mDEPRECATED[0m).
+      [01;33m-[00;32ml [22;31m[[22;33m[ssl://]server[22;31m] [0m
+  [01;33m--[00;32mport=[22;31m[[22;33mport[22;31m] [0m              Server port ([22;31mDEPRECATED[0m).
+  [01;33m--[00;32mpass=[22;31m[[22;33mpassword[22;31m] [0m          Password (default: x).
+      [01;33m-[00;32mp [22;31m[[22;33mpassword[22;31m] [0m
+  [01;33m--[00;32murl=[22;31m[[22;33m[ssl://]user@server:port[22;31m] [0m     Preferred way to specify all the three previous arguments:
+                                 [ssl://]username + server + port
+  [01;33m--[00;32mcleanjobs             [0m    Only accept clean jobs.
+  [01;33m--[00;32mstale=[22;31m[[22;33mstale=100[22;31m] [0m        stale<100 improves performance slightly, stale>100 reduces #stale shares.
+  [01;33m--[00;32mjobtimeout=[22;31m[[22;33mseconds=300[22;31m] [0m If miner does not get new jobs for this time, it will disconnect from pool.
+  [01;33m--[00;32mretries=[22;31m[[22;33mretries=3[22;31m] [0m      Number of times to retry connection to an unvailable pool.
+  [01;33m--[00;32mretrydelay=[22;31m[[22;33mseconds=60[22;31m] [0m  Time between reconnection to an unvailable pool.
+  [01;33m--[00;32mquit-disconnect         [0m    Quit on disconnection from pool or file `quit-miniZ` is detected.
+  [01;33m--[00;32msocks=[22;31m[[22;33mproxy[22;31m] [0m            SOCKS proxy specification, format [username:password@]server:port.
+                                 The prefix username:password@ is optional.
+  [01;33m--[00;32msocksdns              [0m    Let SOCKS proxy resolve DNS requests.
+[01;36m
+ Algorithm options: 
+[0m  [01;33m--[00;32mpar=[22;31m[[22;33mparameters[22;31m] [0m         Algorithm parameters: 144,5|125,4|150,5|144,5s|192,7|210,9|kawpow
+  [01;33m--[00;32mpar=[22;31m[[22;33mparameters[22;31m] [0m         Algorithm parameters: MeowPow|firopow|meraki|fishhash|cfx|etc|reth|ethash
+                                 or progpow|ethash|ubqhash|octopus
+  [01;33m--[00;32mpers=[22;31m[[22;33mpers_string[22;31m] [0m       Personalisation string (or etchash|veil|sero|zano|VeriBlock).
+  [01;33m--[00;32msmart-pers            [0m    Use personalisation "auto" if available.
+[01;36m
+ Display options: 
+[0m  [01;33m--[00;32mcoolui                [0m    Alternative nice look for miniZ
+  [01;33m--[00;32mnocolour              [0m    Remove colours from console.
+  [01;33m--[00;32mcolour                [0m    Keep colours on logfile.
+  [01;33m--[00;32mgpu-line              [0m    Lists each GPU information in a different line.
+  [01;33m--[00;32mpci-order             [0m    Display GPU pci bus numbers instead of sequential.
+  [01;33m--[00;32mtelemetry=[22;31m[[22;33mport[22;31m] [0m         Local API port (default: 20000, set to 0 to disable).
+      [01;33m-[00;32ma [22;31m[[22;33mport[22;31m] [0m
+  [01;33m--[00;32mnohttpheaders         [0m    Remove http headers while using getsat API.
+  [01;33m--[00;32mlocaltime=[22;31m[[22;33mn[22;31m] [0m            Use local time instead of run time for format n=[1:4,11:14].
+  [01;33m--[00;32mshow-solratio         [0m    Shows number of solutions per iteration.
+  [01;33m--[00;32mshow-pers             [0m    Shows personalisation string.
+  [01;33m--[00;32mhideclocks            [0m    Hide gpu/mem clocks from console output.
+  [01;33m--[00;32mminimal               [0m    Removes some information form the console output.
+  [01;33m--[00;32mlatency               [0m    Show current server ping latency.
+  [01;33m--[00;32mshares-detail         [0m    Show accepted/rejected shares per GPU, instead of efficiency.
+  [01;33m--[00;32mall-shares            [0m    Include fee shares on statistics.
+  [01;33m--[00;32mshow-shares           [0m    Shows submitted shares/rejected shares.
+  [01;33m--[00;32mshow-server           [0m    Shows the server address.
+  [01;33m--[00;32mshow-mode             [0m    Shows the kernel being used by each gpu.
+  [01;33m--[00;32mshow-diff=[22;31m[[22;33mn[22;31m] [0m            Shows the difficulty of submitted shares. To tune setting use n=1,2,3.
+  [01;33m--[00;32mserver-share          [0m    Lists percentage time connected to each server (yours and fee's).
+  [01;33m--[00;32mextra                 [0m    Alternative way to specify all the three previous arguments.
+                                 This will show: show-shares + show-server + server-share.
+  [01;33m--[00;32mprofit                [0m    Shows a rough estimate of daily profits on the console (*.01USD).
+  [01;33m--[00;32maccprofit             [0m    Shows a rough estimate session profits on the console (*.01USD).
+                                 Provided by https://minerstat.com[01;36m
+ Logging options: 
+[0m  [01;33m--[00;32mcsv=[22;31m[[22;33mfilename[22;31m] [0m           Save all statistics to [filename] in CSV format.
+  [01;33m--[00;32mlog                   [0m    Copy program output to miniZ.log.
+  [01;33m--[00;32mlog-file=[22;31m[[22;33mfilename[22;31m] [0m      Copy program output to [filename].
+  [01;33m--[00;32mlog-period=[22;31m[[22;33minterval[22;31m] [0m    Interval (seconds) between periodic writes to log file.
+  [01;33m--[00;32mlog-delay=[22;31m[[22;33mdelay[22;31m] [0m        Wait [delay] seconds before starting periodic writes to log file.
+  [01;33m--[00;32mstat-int=[22;31m[[22;33minterval[22;31m] [0m      [interval] in seconds while reading statistics, defaults to 10.
+  [01;33m--[00;32mavg0=[22;31m[[22;33mperiod[22;31m] [0m            Short term average period (s), default is 180 seconds.
+  [01;33m--[00;32mavg1=[22;31m[[22;33mperiod[22;31m] [0m            Long term average period (s), default is 10800 seconds.
+  [01;33m--[00;32mprotocol-dump         [0m    Dump pool stratum communication.
+  [01;33m--[00;32mnonvml                [0m    Disable GPU monitoring.
+  [01;33m--[00;32mforcenvml             [0m    Force GPU monitoring.
+[01;36m
+ Configuration file: 
+[0m  [01;33m--[00;32mread-config [22;31m[[22;33mfilename[22;31m] [0m   Read configuration from [filename] (default: miniZ.conf).
+  [01;33m--[00;32mwrite-config [22;31m[[22;33mfilename[22;31m] [0m  Write configuration to [filename] (default: miniZ.conf).
+[01;36m
+ Optimisation options: 
+[0m  [01;33m--[00;32moc1                   [0m    Combine this option with overclocking to mine faster.
+  [01;33m--[00;32moc2                   [0m    Combine this option with overclocking to mine faster (alternative).
+  [01;33m--[00;32mno-ocx                [0m    miniZ will not run ocx at the begging (default)
+  [01;33m--[00;32mocXsamples=[22;31m[[22;33msamples[22;31m] [0m     Number of samples for ocX, more [samples]->more accuracy (default 300).
+  [01;33m--[00;32mocXreset              [0m    Reset GPU statistics when ocX is finished.
+  [01;33m--[00;32mlist-modes            [0m    List available kernels for each GPU at the beginning.
+  [01;33m--[00;32mtune[GPU] [22;31m[[22;33mopts[22;31m] [0m         Algorithm specific tuning options, ex.: --tune i18d58 (see FAQ page).
+  [01;33m--[00;32mmode[GPU] [22;31m[[22;33mkernel[22;31m] [0m       Forces [GPU] to run [kernel] (see FAQ page).
+[01;36m
+ Dual mining options: 
+[0m  [01;33m--[00;32murl2=[22;31m[[22;33m[ssl://]user@server:port[22;31m] [0m      Set mining address for 2nd algo (see --url for details).
+  [01;33m--[00;32mdualw=[22;31m[[22;33mmultipliers[22;31m] [0m      Apply list of dual algo multipliers.
+  [01;33m--[00;32mdualw-all=[22;31m[[22;33mmultiplier[22;31m] [0m   Apply the same dual algo multipliers to all GPUs.
+  [01;33m--[00;32mdual-mode=[22;31m[[22;33mmode[22;31m] [0m         Sets dual weight to auto for a list of GPUs (0=on/1=off).
+  [01;33m--[00;32mdualmode-all=[22;31m[[22;33mmodes[22;31m] [0m     Apply the same auto dual weight mode to all GPUs.
+[01;36m
+ The following require sudo: 
+[0m  [01;33m--[00;32mmt-auto               [0m    Use automatic memory timings.
+  [01;33m--[00;32mmt-dump               [0m    Dump memory timings in use.
+  [01;33m--[00;32mmt=[22;31m[[22;33mtimings[22;31m] [0m             Apply list of memory timings per GPU (ex. --mt=16.4,20.5).
+  [01;33m--[00;32mfanspeed=[22;31m[[22;33mfanspeeds(%)[22;31m] [0m  Apply list of fan speeds.
+  [01;33m--[00;32mfanspeed-all=[22;31m[[22;33mfanspeed(%)[22;31m] [0m Apply a fan speed to all GPUs.
+  [01;33m--[00;32mfanmax=[22;31m[[22;33mmaxspeed(%)[22;31m] [0m     Apply list of maximum fan speeds for use with fantemp.
+  [01;33m--[00;32mfanmax-all=[22;31m[[22;33mmaxspeed(%)[22;31m] [0m Apply a max fan speed to all GPUs.
+  [01;33m--[00;32mfantemp=[22;31m[[22;33mtemperatures(C)[22;31m] [0mUse GPU fans to apply list of temperatures to GPUs.
+  [01;33m--[00;32mfantemp-all=[22;31m[[22;33mtemperature(C)[22;31m] [0m   Use GPU fans to apply a temperature to all GPUs.
+  [01;33m--[00;32mgpuclock=[22;31m[[22;33mgpuclock(MHz)[22;31m] [0m Apply list of GPU clocks, works for sm>=7. Use gpuclock=1 for auto.
+  [01;33m--[00;32mmemclock=[22;31m[[22;33mmemclock(MHz)[22;31m] [0m Apply list of memory clocks, works for sm>=7. Use memclock=1 for auto.
+  [01;33m--[00;32mgpuoffset=[22;31m[[22;33moffset(MHz)[22;31m] [0m  Apply list of GPU clock offset. Ex: --gpuoffset=+100,-100
+  [01;33m--[00;32mmemoffset=[22;31m[[22;33moffset(MHz)[22;31m] [0m  Apply list of memory clock offsets. Ex: --memoffset=-500,-500
+  [01;33m--[00;32mmemoffset2=[22;31m[[22;33moffset(MHz)[22;31m] [0m Secondary algo memory clock offsets. Ex: --memoffset2=-500,-500
+  [01;33m--[00;32mgpuoffset2=[22;31m[[22;33moffset(MHz)[22;31m] [0m Secondary algo GPU clock offset. Ex: --gpuoffset2=+100,-100
+  [01;33m--[00;32mpower=[22;31m[[22;33mpower(W)[22;31m] [0m         Apply list of power limits.
+      [01;33m-[00;32mpl [22;31m[[22;33mpower(W)[22;31m] [0m
+  [01;33m--[00;32mpower=[22;31m[[22;33mauto[22;31m] [0m             Let miniZ select the power that provides best efficiency.
+      [01;33m-[00;32mpl [22;31m[[22;33mauto[22;31m] [0m
+  [01;33m--[00;32mpowerf=[22;31m[[22;33mpower(%)[22;31m] [0m        Apply a fraction of the nominal power to all gpus.
+      [01;33m-[00;32mplf [22;31m[[22;33mpower(%)[22;31m] [0m
+  [01;33m--[00;32mstocksettings=[22;31m[[22;33menable[22;31m] [0m   Use stocksettings on a list of GPUs (1 or 0). Empty applies to all.
+  [01;33m--[00;32mautoclocks=[22;31m[[22;33menable[22;31m] [0m      Use auto OC settings on a list of GPUs (1 or 0). Empty applies to all.
+  [01;33m--[00;32mpriority=[22;31m[[22;33mpri[22;31m] [0m           miniZ priority (linux hi:-20,low:19 //win hi:2,low:-2).
+[01;36m
+ Other: 
+[0m  [01;33m--[00;32mdag-fix               [0m    Check DAG consistency.
+  [01;33m--[00;32mdag-cache=[22;31m[[22;33moff[22;31m] [0m          Apply list of dag cache options, disable:0 enable:1. Defaults to 1.
+  [01;33m--[00;32mzil-init              [0m    Create ZIL dag at the beginning.
+  [01;33m--[00;32mfee-time=[22;31m[[22;33mtime(s)[22;31m] [0m       Minimum continuous time to mine fee (>20s)
+  [01;33m--[00;32mdonate=[22;31m[[22;33mdonation%[22;31m] [0m       Thanks for donating :-)
+
+[01;34m----- For more information visit our website https://miniz.cc, FAQ page https://miniz.cc/faq -----[0m
+

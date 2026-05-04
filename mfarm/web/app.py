@@ -356,10 +356,16 @@ async def lifespan(app: FastAPI):
     global _poll_task
     _poll_task = asyncio.create_task(poll_all_rigs())
     _udp_task = asyncio.create_task(udp_listener())
+    # Periodic discovery of miner algorithm lists from the actual binaries
+    # on the rigs. Refreshes the cache every (TTL - 60s) so /api/miners
+    # always serves cache hits.
+    from mfarm.web.api import algo_refresh_loop
+    _algo_task = asyncio.create_task(algo_refresh_loop())
     yield
     if _poll_task:
         _poll_task.cancel()
     _udp_task.cancel()
+    _algo_task.cancel()
 
 
 app = FastAPI(title="MeowFarm Dashboard", lifespan=lifespan)

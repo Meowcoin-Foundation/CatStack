@@ -57,11 +57,132 @@ def _parse_srbminer(raw: str) -> list[str]:
     return sorted(out)
 
 
-# Parser dispatch by miner name. Add entries here as discovery for each
-# miner is implemented + tested. Miners not in this table fall back to the
+def _parse_ccminer(raw: str) -> list[str]:
+    # ccminer -h: tab-indented `algo<whitespace>description` block, starts
+    # after "specify the hash algorithm to use" line, ends at next flag def
+    # (line starting with "  -X,").
+    out = set()
+    in_block = False
+    for line in raw.splitlines():
+        bare = _strip_ansi(line)
+        if 'specify the hash algorithm' in bare.lower():
+            in_block = True
+            continue
+        if in_block:
+            # End of block when we hit next flag definition.
+            if re.match(r'\s\s-\w', bare) or re.match(r'\s\s--\w', bare):
+                break
+            stripped = bare.strip()
+            if not stripped:
+                continue
+            # First whitespace-separated token is the algo name.
+            tok = stripped.split()[0]
+            # Sanity: algo names are short, lowercase-ish, can have digits/dashes/colons.
+            if 1 <= len(tok) <= 32 and re.match(r'^[a-zA-Z0-9_:./+-]+$', tok):
+                out.add(tok)
+    return sorted(out)
+
+
+def _parse_trex(raw: str) -> list[str]:
+    # t-rex --help: under "-a, --algo  Specify the hash algorithm to use.",
+    # one algo per line, deeply indented. Block ends at next flag (line whose
+    # left-trim starts with `--` or `-X`).
+    out = set()
+    in_block = False
+    for line in raw.splitlines():
+        bare = _strip_ansi(line)
+        if re.search(r'-a,\s*--algo\b', bare):
+            in_block = True
+            continue
+        if in_block:
+            stripped = bare.strip()
+            if not stripped:
+                continue
+            # End of block: another flag definition. T-rex flags look like
+            # "    -X, --xxx" or "        --xxx".
+            if re.match(r'\s+-{1,2}[a-zA-Z]', bare) and stripped[0] == '-':
+                break
+            tok = stripped.split()[0]
+            if 1 <= len(tok) <= 32 and re.match(r'^[a-zA-Z0-9_-]+$', tok):
+                out.add(tok)
+    return sorted(out)
+
+
+def _parse_lolminer(raw: str) -> list[str]:
+    # lolMiner --list-algos: ASCII-art banner then a table:
+    #   Parameter        Algorithm               Fee %   Needs / Supports --pers
+    #   ALEPH            Blake3-Alephium         0.75    false
+    # First column (whitespace-separated) is the algo parameter.
+    out = set()
+    in_table = False
+    for line in raw.splitlines():
+        bare = _strip_ansi(line).rstrip()
+        if 'Parameter' in bare and 'Algorithm' in bare:
+            in_table = True
+            continue
+        if in_table:
+            if not bare.strip():
+                # blank line ends the table
+                if out:
+                    break
+                continue
+            tok = bare.split()[0] if bare.split() else ''
+            if 1 <= len(tok) <= 32 and re.match(r'^[a-zA-Z0-9_-]+$', tok):
+                out.add(tok)
+    return sorted(out)
+
+
+def _parse_miniz(raw: str) -> list[str]:
+    # miniZ --help: lines like
+    #   --par=[parameters]   Algorithm parameters: 144,5|125,4|150,5|kawpow
+    #   --par=[parameters]   Algorithm parameters: MeowPow|firopow|...
+    # Split right side of "Algorithm parameters:" on `|`.
+    out = set()
+    for line in raw.splitlines():
+        bare = _strip_ansi(line)
+        m = re.search(r'Algorithm parameters:\s*(.+)$', bare)
+        if not m:
+            continue
+        for p in m.group(1).split('|'):
+            tok = p.strip()
+            if 1 <= len(tok) <= 32 and re.match(r'^[a-zA-Z0-9_,./+-]+$', tok):
+                out.add(tok)
+    return sorted(out)
+
+
+def _parse_rigel(raw: str) -> list[str]:
+    # rigel --help: under "Currently supported:" — one algo per line, format
+    # "          algo_name (TICKER)". Block ends at blank line.
+    out = set()
+    in_block = False
+    for line in raw.splitlines():
+        bare = _strip_ansi(line)
+        if 'Currently supported:' in bare:
+            in_block = True
+            continue
+        if in_block:
+            stripped = bare.strip()
+            if not stripped:
+                if out:
+                    break
+                continue
+            # Match `algo_name  (XYZ, ...)` — first token before paren.
+            m = re.match(r'([a-zA-Z0-9_-]+)\s*\(', stripped)
+            if m:
+                out.add(m.group(1))
+    return sorted(out)
+
+
+# Parser dispatch by miner name. Miners not in this table fall back to the
 # hardcoded supported_algos list.
 ALGO_PARSERS = {
-    "srbminer": _parse_srbminer,
+    "srbminer":     _parse_srbminer,
+    "ccminer":      _parse_ccminer,
+    "cpuminer-opt": _parse_ccminer,   # same -h format as ccminer
+    "trex":         _parse_trex,
+    "lolminer":     _parse_lolminer,
+    "miniz":        _parse_miniz,
+    "rigel":        _parse_rigel,
 }
 
 
@@ -99,6 +220,7 @@ _register(MinerDefinition(
     api_type="ccminer_tcp",
     default_api_port=4068,
     supports_solo=True,
+    algo_query_argv=["-h"],
 ))
 
 _register(MinerDefinition(
@@ -122,6 +244,7 @@ _register(MinerDefinition(
     api_type="ccminer_tcp",
     default_api_port=4048,
     supports_solo=True,
+    algo_query_argv=["-h"],
 ))
 
 _register(MinerDefinition(
@@ -138,6 +261,7 @@ _register(MinerDefinition(
     api_type="trex_http",
     default_api_port=4067,
     supports_solo=False,
+    algo_query_argv=["--help"],
 ))
 
 _register(MinerDefinition(
@@ -154,6 +278,7 @@ _register(MinerDefinition(
     api_type="lolminer_http",
     default_api_port=44444,
     supports_solo=False,
+    algo_query_argv=["--list-algos"],
 ))
 
 _register(MinerDefinition(
@@ -187,6 +312,7 @@ _register(MinerDefinition(
     api_type="miniz_http",
     default_api_port=20000,
     supports_solo=False,
+    algo_query_argv=["--help"],
 ))
 
 
@@ -248,6 +374,7 @@ _register(MinerDefinition(
     api_type="rigel_http",
     default_api_port=4067,
     supports_solo=False,
+    algo_query_argv=["--help"],
 ))
 
 

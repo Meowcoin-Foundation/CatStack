@@ -1463,6 +1463,32 @@ async def refresh_miner_algos():
     return out
 
 
+async def algo_refresh_loop():
+    """Background task: discover algos for every miner periodically.
+
+    Runs at server startup (via lifespan) so the dropdown is populated
+    even before any user opens it. Repeats hourly so binary updates
+    (via 'Update Miners') propagate without a manual refresh click.
+    """
+    # Brief startup delay to let the rig poll task warm up the SSH pool
+    # and inventory load.
+    await asyncio.sleep(15)
+    while True:
+        try:
+            _DISCOVERED_ALGOS.clear()
+            for m in list_miners():
+                await _algos_for(m)
+            logging.info("algo refresh complete: %d miners discovered live",
+                         len(_DISCOVERED_ALGOS))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning("algo refresh failed: %s", e)
+        # Sleep just under the cache TTL so /api/miners always serves
+        # cache hits and the discovery work happens off the request path.
+        await asyncio.sleep(_DISCOVERY_TTL_SEC - 60)
+
+
 @router.post("/rigs/{name}/update-miners")
 async def update_miners(name: str):
     """Update all miner binaries on a rig.

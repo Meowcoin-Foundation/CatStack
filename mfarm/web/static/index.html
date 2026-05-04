@@ -195,6 +195,7 @@ main { padding: 20px 24px; }
 .rig-status.offline { background: rgba(248,81,73,0.15); color: var(--red); }
 .rig-status.idle { background: rgba(210,153,34,0.15); color: var(--yellow); }
 .rig-status.hot { background: rgba(248,81,73,0.3); color: var(--red); }
+.rig-status.vast { background: rgba(188,140,255,0.18); color: var(--purple); }
 
 .card-body { padding: 12px 16px; }
 
@@ -477,7 +478,7 @@ main { padding: 20px 24px; }
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Name</label><input id="fs-name" placeholder="luckypepe-solo" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Coin</label><input id="fs-coin" placeholder="LKPEPE" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Miner</label><select id="fs-miner" onchange="onFSMinerChange()" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></select></div>
-        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Algorithm</label><select id="fs-algo" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></select></div>
+        <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Algorithm <button type="button" id="fs-algo-refresh" onclick="refreshAlgos()" title="Re-discover algorithms by querying installed miner binaries on the rigs" style="float:right;font-size:11px;padding:1px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer">↻ refresh</button></label><select id="fs-algo" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></select></div>
         <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Pool URL</label><input id="fs-pool" placeholder="stratum+tcp://pool:3333 or http://node:9778" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div style="grid-column:1/-1"><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Wallet</label><input id="fs-wallet" placeholder="Wallet address" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
         <div><label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Password</label><input id="fs-pass" value="x" style="width:100%;padding:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px"></div>
@@ -653,14 +654,18 @@ function rigCard(r) {
   const gpus = s.gpus || [];
   // A rig is "mining" if either slot has a running miner. CPU-only rigs
   // like mini-02 have m empty but cm running with 20 kH/s RandomX.
+  // Vast-host rigs have mfarm-agent masked, so stats.miner is absent —
+  // backend tags them with _vastai_active so we can show a distinct status.
   const gpuRunning = !!m.running;
   const cpuRunning = !!cm.running;
-  const online = r.online && !!s.miner;
+  const isVast = !!s._vastai_active;
+  const online = !!r.online;                      // reachable via SSH
   const mining = online && (gpuRunning || cpuRunning);
   const maxTemp = Math.max(...gpus.map(g => g.temp || 0), 0);
 
   let status, statusClass;
-  if (!r.online) { status = 'OFFLINE'; statusClass = 'offline'; }
+  if (!online) { status = 'OFFLINE'; statusClass = 'offline'; }
+  else if (isVast) { status = 'VAST'; statusClass = 'vast'; }
   else if (!mining) { status = 'IDLE'; statusClass = 'idle'; }
   else if (maxTemp >= 80) { status = 'HOT'; statusClass = 'hot'; }
   else { status = 'MINING'; statusClass = 'online'; }
@@ -706,6 +711,7 @@ function rigCard(r) {
         ${r.flight_sheet ? `<span class="tag">${r.flight_sheet}</span>` : ''}
         ${r.group ? `<span class="tag">${r.group}</span>` : ''}
         <span class="tag">${r.host}</span>
+        ${r.mac ? `<span class="tag" style="font-family:monospace" title="MAC address">${r.mac}</span>` : ''}
       </div>
     </div>`;
 }
@@ -901,6 +907,7 @@ async function openRig(name) {
       <button class="btn" onclick="viewMinerLog('${name}','cpu')">CPU Miner Log</button>
       <button class="btn" onclick="updateMiners('${name}')">Update Miners</button>
       <button class="btn" onclick="pushSshKey('${name}')">Push SSH Key</button>
+      <button class="btn" onclick="installVast('${name}')" title="Convert this rig from a miner to a Vast.ai host. Runs the full prep+install (partition resize, service masking, daemon install).">Install Vast.ai</button>
       <button class="btn" onclick="renameRig('${name}')">Rename</button>
       <button class="btn danger" onclick="deleteRig('${name}')">Remove Rig</button>
     </div>
@@ -1494,6 +1501,142 @@ async function minerCmd(name, type, command) {
   }
 }
 
+// ── Vast.ai install ─────────────────────────────────────────────────
+//
+// Converts a CatStack mining rig into a Vast.ai host. Runs install-vast.sh
+// (mfarm/worker/install-vast.sh) which handles partition resize, service
+// masking, sudoers env_keep, docker .deb pre-cache, then runs the Vast
+// installer in screen and applies post-install fixes. See reference_vastai_install.md
+// for the gotcha catalog the script bakes in.
+
+async function installVast(name) {
+  closeModal();
+  // Suggest a port base — bump from the highest already-used. The user
+  // tracks this themselves; this is just a starting hint.
+  const used = (Object.values(rigData || {})
+    .map(r => (r.notes || '').match(/vast.port.base.(\d+)/i))
+    .filter(Boolean)
+    .map(m => parseInt(m[1])));
+  const suggestedBase = used.length ? Math.max(...used) + 1 : 41;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay active';
+  overlay.id = 'vast-install-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) closeVastInstall(); };
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:680px">
+      <div class="modal-header">
+        <h2>Install Vast.ai on ${name}</h2>
+        <button class="modal-close" onclick="closeVastInstall()">&times;</button>
+      </div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="background:var(--bg3);padding:10px 12px;border-radius:6px;font-size:12px;line-height:1.5;color:var(--text-dim)">
+          1. Grab a fresh install token from <a href="https://cloud.vast.ai/host/setup/" target="_blank" style="color:var(--cyan)">cloud.vast.ai/host/setup/</a> — token is single-use, consumed at the first identify call.<br>
+          2. Pick a port base unique among your rigs that share a public IP (the script forwards <code>BASE000–BASE200</code>).<br>
+          3. The install runs ~10 min; this dialog will stream progress live.
+        </div>
+        <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Install token (the long hex string after <code>install</code> on the setup page)</label>
+        <textarea id="vast-token" placeholder="b286dfed6f26bc56e2284e6f39aee314935f7276503d77266aec6a10088f382c"
+          style="width:100%;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-family:monospace;min-height:60px;resize:vertical"></textarea>
+        <label style="display:block;color:var(--text-dim);font-size:12px;margin-bottom:4px">Port base (uses ports BASE000–BASE200)</label>
+        <input id="vast-port-base" type="number" min="10" max="99" value="${suggestedBase}"
+          style="width:120px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+        <div id="vast-install-result" style="font-size:12px;color:var(--text-dim);min-height:18px"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" onclick="closeVastInstall()">Cancel</button>
+          <button class="btn success" id="vast-install-go" onclick="vastInstallGo('${name}')">Start install</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  setTimeout(() => document.getElementById('vast-token')?.focus(), 50);
+}
+
+function closeVastInstall() {
+  if (window.vastLogInterval) { clearInterval(window.vastLogInterval); window.vastLogInterval = null; }
+  document.getElementById('vast-install-overlay')?.remove();
+}
+
+async function vastInstallGo(name) {
+  const token = document.getElementById('vast-token').value.trim();
+  const portBase = parseInt(document.getElementById('vast-port-base').value);
+  const result = document.getElementById('vast-install-result');
+  const goBtn = document.getElementById('vast-install-go');
+
+  if (!token || token.length < 30) {
+    result.innerHTML = '<span style="color:var(--red)">token looks too short — paste the full hex string</span>';
+    return;
+  }
+  if (!Number.isInteger(portBase) || portBase < 10 || portBase > 99) {
+    result.innerHTML = '<span style="color:var(--red)">port base must be 10–99</span>';
+    return;
+  }
+
+  goBtn.disabled = true;
+  result.innerHTML = '<span style="color:var(--text-dim)">launching install on rig...</span>';
+
+  try {
+    const res = await fetch(`/api/rigs/${name}/install-vast`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token, port_base: portBase})
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.innerHTML = `<span style="color:var(--red)">${data.detail || JSON.stringify(data)}</span>`;
+      goBtn.disabled = false;
+      return;
+    }
+  } catch (e) {
+    result.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+    goBtn.disabled = false;
+    return;
+  }
+
+  // Swap the dialog into a live log viewer
+  document.getElementById('vast-install-overlay').querySelector('.modal').innerHTML = `
+    <div class="modal-header">
+      <h2>Installing Vast.ai on ${name} (port ${portBase}000-${portBase}200)</h2>
+      <button class="modal-close" onclick="closeVastInstall()">&times;</button>
+    </div>
+    <div style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      <span id="vast-install-status" style="color:var(--cyan);font-weight:600">running…</span>
+      <span style="color:var(--text-dim);font-size:11px;margin-left:auto">install runs in screen on the rig — closing this dialog won't kill it</span>
+    </div>
+    <div id="vast-install-log" class="terminal" style="height:500px;max-height:70vh;margin:0;border-radius:0 0 12px 12px;font-size:11px;line-height:1.4;overflow-y:auto;white-space:pre-wrap;font-family:monospace">waiting for first lines…</div>`;
+
+  refreshVastInstallLog(name);
+  window.vastLogInterval = setInterval(() => refreshVastInstallLog(name), 2500);
+}
+
+async function refreshVastInstallLog(name) {
+  try {
+    const res = await fetch(`/api/rigs/${name}/vast-install-log?lines=120`);
+    const data = await res.json();
+    const el = document.getElementById('vast-install-log');
+    const status = document.getElementById('vast-install-status');
+    if (!el) return;
+    const wasNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    el.textContent = data.log || '(no log yet)';
+    if (wasNearBottom) el.scrollTop = el.scrollHeight;
+
+    // Detect terminal state
+    const txt = data.log || '';
+    if (/=== EXIT 0 ===/.test(txt) && /Daemon Running|status:\s*vastai active/.test(txt)) {
+      status.innerHTML = '<span style="color:var(--green)">✓ install complete — daemon active</span>';
+      if (window.vastLogInterval) { clearInterval(window.vastLogInterval); window.vastLogInterval = null; }
+    } else if (/Install failed|FATAL:|=== EXIT [^0]/.test(txt)) {
+      status.innerHTML = '<span style="color:var(--red)">✗ install failed — see log tail</span>';
+      if (window.vastLogInterval) { clearInterval(window.vastLogInterval); window.vastLogInterval = null; }
+    } else if (!data.running && txt.length > 100) {
+      status.innerHTML = '<span style="color:var(--yellow)">script exited but no clear success/fail marker — check log</span>';
+      if (window.vastLogInterval) { clearInterval(window.vastLogInterval); window.vastLogInterval = null; }
+    }
+  } catch (e) {
+    // Don't kill the polling on transient errors
+  }
+}
+
 async function pushSshKey(name) {
   if (!confirm(`Push CatStack's SSH key to "${name}" using default password?\n\nUse this when a rig is freshly flashed with MeowOS and SSH key auth is failing.`)) return;
   try {
@@ -1665,16 +1808,21 @@ async function deleteFS(name) {
   loadFlightSheets();
 }
 
-// Miner registry for algo dropdown
+// Miner registry for algo dropdown. Algos are derived live from each miner's
+// --list-algorithms (or equivalent) by the server. The server caches for 1h
+// and refreshes on a background task; click the "↻ refresh" button next to
+// the Algorithm field to force re-discovery on demand.
 let _miners = [];
 async function loadMinerRegistry() {
   try {
     _miners = await (await fetch('/api/miners')).json();
     const sel = document.getElementById('fs-miner');
-    sel.innerHTML = _miners.map(m =>
-      `<option value="${m.name}">${m.display_name} (${m.gpu_type})</option>`
-    ).join('');
-    onFSMinerChange();
+    if (sel) {
+      sel.innerHTML = _miners.map(m =>
+        `<option value="${m.name}">${m.display_name} (${m.gpu_type}, ${m.algos.length} algos)</option>`
+      ).join('');
+      onFSMinerChange();
+    }
   } catch(e) { console.error('Failed to load miners', e); }
 }
 function onFSMinerChange() {
@@ -1683,6 +1831,20 @@ function onFSMinerChange() {
   const algoSel = document.getElementById('fs-algo');
   if (m) {
     algoSel.innerHTML = m.algos.map(a => `<option value="${a}">${a}</option>`).join('');
+  }
+}
+async function refreshAlgos() {
+  const btn = document.getElementById('fs-algo-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ refreshing...'; }
+  try {
+    const res = await (await fetch('/api/miners/refresh', {method:'POST'})).json();
+    await loadMinerRegistry();
+    const fromBin = res.filter(r => r.from_binary).length;
+    if (btn) btn.textContent = `↻ ${fromBin}/${res.length} from binary`;
+    setTimeout(() => { if (btn) { btn.textContent = '↻ refresh'; btn.disabled = false; } }, 3000);
+  } catch (e) {
+    console.error('Refresh failed', e);
+    if (btn) { btn.textContent = '↻ refresh failed'; btn.disabled = false; }
   }
 }
 loadMinerRegistry();
