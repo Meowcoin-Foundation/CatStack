@@ -7,13 +7,35 @@ DEST="/opt/mfarm/miners"
 mkdir -p "$DEST"
 TARGET="${1:-all}"
 
+FAIL_COUNT=0
+
 download() {
-    local name="$1" url="$2" binary="$3" strip="${4:-0}"
+    # Args: name, url, install_name, [archive_binary]
+    #   install_name = filename to write at $DEST (what mfarm-agent looks for)
+    #   archive_binary = name to find inside the archive, defaults to install_name
+    #     (needed when archive has a different-cased or version-suffixed binary,
+    #      e.g. SRBMiner-Multi v3.x ships as SRBMiner-Multi-3-2-7/SRBMiner-MULTI)
+    local name="$1" url="$2" install_name="$3" archive_binary="${4:-$3}"
     if [ "$TARGET" != "all" ] && [ "$TARGET" != "$name" ]; then return; fi
-    echo "  Downloading $name..."
+    echo "  Downloading $name from $url"
     cd /tmp
     rm -rf "dl-$name"; mkdir "dl-$name"; cd "dl-$name"
-    wget -q --show-progress "$url" -O archive 2>&1 || { echo "  FAILED: $name"; return; }
+    if ! wget -q --show-progress "$url" -O archive 2>&1; then
+        echo "  FAILED: $name — wget error" >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        return
+    fi
+    # Catch silent 404s — github returns a 9-byte text body. Anything under 1KB
+    # for a miner archive is suspect.
+    local sz
+    sz=$(stat -c%s archive 2>/dev/null || wc -c < archive)
+    if [ "$sz" -lt 1024 ]; then
+        echo "  FAILED: $name — archive too small ($sz bytes; likely 404 or release retracted)" >&2
+        head -c 200 archive >&2; echo >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-$name"
+        return
+    fi
 
     # Detect archive type from magic bytes (NOT `file` — minimal MeowOS images
     # don't ship `file` and the downloader silently fell through to `mv archive
@@ -27,7 +49,7 @@ download() {
         fd377a58|377abcaf) tar xJf archive 2>/dev/null || tar xf archive 2>/dev/null ;;  # xz / 7z
         4c5a4950)          tar xf archive 2>/dev/null ;;             # lzip
         425a68*)           tar xjf archive 2>/dev/null ;;            # bzip2
-        7f454c46|cffaedfe) mv archive "$binary" ;;                   # ELF / Mach-O — raw binary
+        7f454c46|cffaedfe) mv archive "$install_name" ;;             # ELF / Mach-O — raw binary
         *)
             # Unknown magic: fall back to extension-based detection
             case "$url" in
@@ -36,23 +58,27 @@ download() {
                 *.tar.bz2|*.tbz) tar xjf archive 2>/dev/null ;;
                 *.tar)           tar xf archive 2>/dev/null ;;
                 *.zip)           unzip -q archive 2>/dev/null ;;
-                *)               mv archive "$binary" ;;
+                *)               mv archive "$install_name" ;;
             esac
             ;;
     esac
 
-    # Find the binary
-    BIN=$(find . -name "$binary" -type f | head -1)
+    # Locate the binary inside the extracted tree.
+    # 1. Exact match for the archive's binary name.
+    # 2. Fallback: largest executable file >1MB (skip .sh wrapper scripts).
+    BIN=$(find . -name "$archive_binary" -type f | head -1)
     if [ -z "$BIN" ]; then
-        BIN=$(find . -type f -executable | head -1)
+        BIN=$(find . -type f -executable -size +1M -printf '%s %p\n' 2>/dev/null \
+              | sort -rn | head -1 | cut -d' ' -f2-)
     fi
-    if [ -n "$BIN" ]; then
-        cp "$BIN" "$DEST/$binary"
-        chmod +x "$DEST/$binary"
-        echo "  OK: $DEST/$binary ($(ls -lh "$DEST/$binary" | awk '{print $5}'))"
+    if [ -n "$BIN" ] && [ -s "$BIN" ]; then
+        cp "$BIN" "$DEST/$install_name"
+        chmod +x "$DEST/$install_name"
+        echo "  OK: $DEST/$install_name ($(ls -lh "$DEST/$install_name" | awk '{print $5}'))"
     else
-        echo "  FAILED: binary '$binary' not found in archive"
-        ls -la
+        echo "  FAILED: $name — binary '$archive_binary' not found in archive" >&2
+        ls -la >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
     cd /tmp; rm -rf "dl-$name"
 }
@@ -84,10 +110,13 @@ download "cpuminer-opt" \
     "https://github.com/JayDDee/cpuminer-opt/releases/download/v24.4/cpuminer-opt-24.4-linux-x86_64.tar.gz" \
     "cpuminer"
 
-# SRBMiner-Multi (AMD/CPU)
+# SRBMiner-Multi (AMD/CPU). Archive layout from v3.x: SRBMiner-Multi-N-N-N/SRBMiner-MULTI
+# (uppercase MULTI, in versioned subdir). 4th arg is the binary name inside the tarball;
+# we install it as "SRBMiner-Multi" to match what mfarm-agent.py looks for.
 download "srbminer" \
-    "https://github.com/doktor83/SRBMiner-Multi/releases/download/2.8.3/SRBMiner-Multi-2-8-3-Linux.tar.xz" \
-    "SRBMiner-Multi"
+    "https://github.com/doktor83/SRBMiner-Multi/releases/download/3.2.7/SRBMiner-Multi-3-2-7-Linux.tar.gz" \
+    "SRBMiner-Multi" \
+    "SRBMiner-MULTI"
 
 # Rigel (NVIDIA — xelishash, autolykos2, kaspa, ironfish, etc.)
 download "rigel" \
@@ -97,3 +126,9 @@ download "rigel" \
 echo ""
 echo "=== Installed miners ==="
 ls -lh "$DEST/"
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "" >&2
+    echo "=== $FAIL_COUNT miner(s) failed to install — see errors above ===" >&2
+    exit 1
+fi
