@@ -22,6 +22,7 @@ class Rig:
     gpu_list: str | None = None  # JSON string
     cpu_model: str | None = None
     mac: str | None = None
+    agent_token: str | None = None
     notes: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -117,6 +118,39 @@ class Rig:
                    ORDER BY r.name""",
             ).fetchall()
         return [Rig.from_row(r) for r in rows]
+
+    @staticmethod
+    def get_by_token(db: sqlite3.Connection, token: str) -> Rig | None:
+        """Look up a rig by its agent token. Used by the agent push/poll
+        endpoints to authenticate inbound requests. Token is opaque (the
+        operator-issued `secrets.token_urlsafe(32)`); a missing or empty
+        token always returns None so the caller can 401 cleanly."""
+        if not token:
+            return None
+        row = db.execute(
+            """SELECT r.*, g.name as group_name,
+                      fs.name as flight_sheet_name,
+                      oc.name as oc_profile_name
+               FROM rigs r
+               LEFT JOIN groups g ON r.group_id = g.id
+               LEFT JOIN flight_sheets fs ON r.flight_sheet_id = fs.id
+               LEFT JOIN oc_profiles oc ON r.oc_profile_id = oc.id
+               WHERE r.agent_token = ?""",
+            (token,),
+        ).fetchone()
+        return Rig.from_row(row) if row else None
+
+    @staticmethod
+    def set_agent_token(db: sqlite3.Connection, rig_id: int, token: str | None) -> None:
+        """Set or clear a rig's agent token via a targeted UPDATE.
+
+        Kept separate from `save()` so a generic CRUD round-trip can't
+        accidentally null the token by saving a Rig object loaded without
+        it. The unique partial index on agent_token will raise
+        IntegrityError if the token is already issued to another rig.
+        """
+        db.execute("UPDATE rigs SET agent_token=? WHERE id=?", (token, rig_id))
+        db.commit()
 
 
 @dataclass

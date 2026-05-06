@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
+import secrets
 import shlex
 import subprocess
 import time as _time
@@ -21,6 +23,13 @@ from mfarm.db.connection import get_db
 from mfarm.db.models import Rig, FlightSheet, OcProfile, Group
 from mfarm.ssh.pool import get_pool
 from mfarm.miners.registry import list_miners, get_miner, parse_algo_output
+from mfarm.web import agent_state
+
+# Stats are considered "fresh" while the agent has pushed within this many
+# seconds. Beyond it, fall back to the SSH-pull legacy path. 30s gives an
+# agent at the default 2s stats_interval ~15 attempts to recover from a
+# transient outage before the dashboard goes back to SSH.
+PUSH_STATS_TTL_SECS = 30
 
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=5)
@@ -138,6 +147,41 @@ def delete_rig(name: str):
     rig.delete(db)
     _hook_router_remove(name)
     return {"status": "deleted"}
+
+
+@router.post("/rigs/{name}/agent-token")
+def rotate_agent_token(name: str):
+    """Generate a fresh agent token for this rig and store it.
+
+    Returns `{"token": "<plaintext>"}`. The operator must immediately
+    deploy this token into the rig's `/etc/mfarm/config.json` (field
+    `agent_token`) — once the dashboard navigates away, there's no
+    "show again" flow; rotating issues a brand-new token and orphans
+    the old one.
+
+    Calling this on a rig that already has a token is fine and
+    intended: the rig's old token stops working as soon as the new one
+    is committed, which is the right behavior on suspected compromise
+    or when re-claiming a recovered rig."""
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"Rig '{name}' not found")
+    token = secrets.token_urlsafe(32)
+    Rig.set_agent_token(db, rig.id, token)
+    return {"token": token}
+
+
+@router.get("/rigs/{name}/agent-token-status")
+def agent_token_status(name: str):
+    """Whether this rig has an agent token issued. Does NOT reveal the
+    token itself — that's only returned at issue time. The dashboard
+    uses this to render an "Issue token" vs "Rotate token" button."""
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404, f"Rig '{name}' not found")
+    return {"issued": rig.agent_token is not None}
 
 
 @router.post("/rigs/{name}/sync-hostname")
@@ -276,11 +320,25 @@ def _hook_rig_hostname_sync(rig_name: str) -> None:
 
 @router.get("/rigs/{name}/stats")
 async def get_rig_stats(name: str):
-    """Fetch fresh stats from a rig on demand."""
+    """Fetch fresh stats from a rig on demand.
+
+    Cache-first path: if the rig's agent has pushed within
+    PUSH_STATS_TTL_SECS, return that — a dict lookup, no SSH.
+
+    Fallback: legacy SSH-cat of /var/run/mfarm/stats.json. Stays in place
+    until every rig is on the push transport (no token issued ⇒ no push ⇒
+    fallback wins). Once the fleet is fully migrated, drop the SSH branch
+    and the `pool` import dependence here goes with it.
+    """
     db = get_db()
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404)
+
+    s = agent_state.get(rig.id)
+    if s.last_stats is not None and agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        return s.last_stats
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
@@ -296,17 +354,34 @@ async def get_rig_stats(name: str):
 
 @router.post("/rigs/{name}/reboot")
 async def reboot_rig(name: str):
+    """Reboot a rig.
+
+    Enqueue-first: if the rig's agent has pushed recently, drop a `reboot`
+    command on its long-poll queue. The agent will execute, the rig goes
+    down, no result comes back — that's the expected signal for a reboot
+    command and not an error.
+
+    Fallback: legacy SSH `reboot`. Used for rigs that don't have a token
+    yet, or whose agent has gone silent (>PUSH_STATS_TTL_SECS since last
+    push) — in the latter case the rig may be wedged anyway and SSH is
+    our only remaining lever.
+    """
     db = get_db()
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404)
+
+    if agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        agent_state.enqueue(rig.id, "reboot")
+        return {"status": "rebooting", "via": "agent"}
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(_executor, lambda: pool.exec(rig, "reboot", timeout=5))
     except Exception:
         pass
-    return {"status": "rebooting"}
+    return {"status": "rebooting", "via": "ssh"}
 
 
 @router.post("/rigs/{name}/exec")
@@ -318,22 +393,42 @@ async def exec_on_rig(name: str, body: dict):
     command = body.get("command", "")
     if not command:
         raise HTTPException(400, "No command provided")
+
+    # Push path: enqueue an `exec` command on the agent's long-poll and
+    # block on the result. The agent runs `bash -lc <command>` itself so
+    # /etc/profile.d aliases resolve identically to the SSH path. We give
+    # the wait 35s — 5s slack over the agent's own 30s subprocess timeout
+    # so a TimeoutExpired translates into rc=124 from the agent rather
+    # than a wait_for_result timeout (the latter would silently fall back
+    # to SSH and re-run the command, bad for non-idempotent ops).
+    if agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        result = await agent_state.enqueue_and_wait(
+            rig.id, "exec", {"cmd": command, "timeout": 30}, timeout=35,
+        )
+        if result is not None:
+            return {
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "exit_code": result.get("rc", -1),
+                "via": "agent",
+            }
+        # Wait timed out — agent went silent mid-command. Fall through to
+        # SSH for this single call. The next request will re-evaluate
+        # stats_age; if the agent is healthy the cache flips back over.
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
-    # Wrap in `bash -lc` so /etc/profile and /etc/profile.d/* are sourced.
-    # paramiko's exec_command runs as a non-interactive non-login shell, which
-    # skips both /etc/profile and ~/.bashrc — so functions defined in
-    # /etc/profile.d/miner-attach.sh (e.g. `miner start|stop|restart`) aren't
-    # in scope. -l forces login shell so the typed command sees the same
-    # environment a real `ssh user@host` interactive session would.
+    # Same shell wrap on the SSH side — paramiko exec_command skips
+    # /etc/profile by default; without the wrap, miner-attach.sh aliases
+    # like `miner restart` aren't in scope.
     wrapped = f"bash -lc {shlex.quote(command)}"
     try:
         stdout, stderr, rc = await loop.run_in_executor(
             _executor, lambda: pool.exec(rig, wrapped, timeout=30)
         )
-        return {"stdout": stdout, "stderr": stderr, "exit_code": rc}
+        return {"stdout": stdout, "stderr": stderr, "exit_code": rc, "via": "ssh"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "via": "ssh"}
 
 
 @router.post("/rigs/{name}/restart-miner")
@@ -342,6 +437,14 @@ async def restart_miner(name: str):
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404)
+
+    # Fire-and-forget: don't wait for the agent's result — `restart_miner`
+    # gives the same end state regardless and the dashboard will see the
+    # miner come back up via the next stats push.
+    if agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        agent_state.enqueue(rig.id, "restart_miner")
+        return {"status": "restart_sent", "via": "agent"}
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
@@ -349,7 +452,7 @@ async def restart_miner(name: str):
             _executor,
             lambda: pool.upload_string(rig, "restart_miner", "/var/run/mfarm/command")
         )
-        return {"status": "restart_sent"}
+        return {"status": "restart_sent", "via": "ssh"}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -360,6 +463,11 @@ async def stop_miner(name: str):
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404)
+
+    if agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        agent_state.enqueue(rig.id, "stop_miner")
+        return {"status": "stop_sent", "via": "agent"}
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
@@ -367,7 +475,7 @@ async def stop_miner(name: str):
             _executor,
             lambda: pool.upload_string(rig, "stop_miner", "/var/run/mfarm/command")
         )
-        return {"status": "stop_sent"}
+        return {"status": "stop_sent", "via": "ssh"}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -667,13 +775,13 @@ def get_rig_history(name: str, hours: int = 24):
     if not rig:
         raise HTTPException(404, f"Rig '{name}' not found")
     rows = db.execute(
-        "SELECT timestamp, hashrate, power_draw, accepted, rejected "
+        "SELECT timestamp, hashrate, power_draw, accepted, rejected, algo "
         "FROM rig_snapshots WHERE rig_id = ? AND timestamp >= datetime('now', ?) "
         "ORDER BY timestamp ASC",
         (rig.id, f"-{hours} hours"),
     ).fetchall()
     return [
-        {"t": r[0], "hr": r[1], "power": r[2], "acc": r[3], "rej": r[4]}
+        {"t": r[0], "hr": r[1], "power": r[2], "acc": r[3], "rej": r[4], "algo": r[5]}
         for r in rows
     ]
 
@@ -925,6 +1033,7 @@ class OcProfileCreate(BaseModel):
     mem_lock: int | None = None
     power_limit: int | None = None
     fan_speed: int | None = None
+    per_gpu: list[dict] | None = None
 
 
 @router.get("/oc-profiles")
@@ -941,7 +1050,8 @@ def create_oc_profile(data: OcProfileCreate):
     p = OcProfile(name=data.name, core_offset=data.core_offset,
                   mem_offset=data.mem_offset, core_lock=data.core_lock,
                   mem_lock=data.mem_lock, power_limit=data.power_limit,
-                  fan_speed=data.fan_speed)
+                  fan_speed=data.fan_speed,
+                  per_gpu_overrides=json.dumps(data.per_gpu) if data.per_gpu else None)
     p.save(db)
     return _oc_to_dict(OcProfile.get_by_name(db, data.name))
 
@@ -953,6 +1063,7 @@ class OcProfileUpdate(BaseModel):
     mem_lock: int | None = None
     power_limit: int | None = None
     fan_speed: int | None = None
+    per_gpu: list[dict] | None = None
     notes: str | None = None
 
 
@@ -964,7 +1075,10 @@ def update_oc_profile(name: str, data: OcProfileUpdate):
         raise HTTPException(404, f"OC profile '{name}' not found")
     updates = data.model_dump(exclude_unset=True)
     for field, value in updates.items():
-        setattr(p, field, value)
+        if field == "per_gpu":
+            p.per_gpu_overrides = json.dumps(value) if value else None
+        else:
+            setattr(p, field, value)
     p.save(db)
     return _oc_to_dict(OcProfile.get_by_name(db, name))
 
@@ -980,30 +1094,112 @@ def delete_oc_profile(name: str):
 
 
 def _build_oc_script(profile: OcProfile, label: str) -> str:
-    """Render the persistent /opt/mfarm/apply-oc.sh body for `profile`."""
-    s = '#!/bin/bash\nnvidia-smi -pm 1 > /dev/null 2>&1\n'
+    """Render the persistent /opt/mfarm/apply-oc.sh body for `profile`.
+
+    Per-GPU overrides (profile.per_gpu) are applied on top of the global
+    settings: any field present on a per-GPU entry replaces the global for
+    that GPU index; missing fields fall back to the global.
+    """
+    overrides: dict[int, dict] = {}
+    if profile.per_gpu:
+        for entry in profile.per_gpu:
+            idx = entry.get("gpu")
+            if isinstance(idx, int):
+                overrides[idx] = entry
+
+    # Every nvidia-* invocation appends to oc.log so silent failures (e.g.
+    # `-lgc` rejecting an unsupported clock value, or persistence not yet
+    # active on this GPU) become visible. We also `nvidia-smi -i $i -pm 1`
+    # and `-rgc` per-GPU before locking — on consumer Ada cards a stale
+    # prior lock or per-GPU persistence-off state silently no-ops the new
+    # lock.
+    def _emit(eff: dict, indent: str) -> str:
+        out = ""
+        if eff.get("core_offset") is not None:
+            out += f'{indent}nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={eff["core_offset"]}" >> "$LOG" 2>&1 || true\n'
+        if eff.get("mem_offset") is not None:
+            out += f'{indent}nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={eff["mem_offset"]}" >> "$LOG" 2>&1 || true\n'
+        if eff.get("core_lock") is not None:
+            out += f'{indent}nvidia-smi -i $i -pm 1 >> "$LOG" 2>&1\n'
+            out += f'{indent}nvidia-smi -i $i -rgc >> "$LOG" 2>&1\n'
+            out += f'{indent}nvidia-smi -i $i -lgc {eff["core_lock"]},{eff["core_lock"]} >> "$LOG" 2>&1\n'
+        if eff.get("mem_lock") is not None:
+            out += f'{indent}nvidia-smi -i $i -pm 1 >> "$LOG" 2>&1\n'
+            out += f'{indent}nvidia-smi -i $i -rmc >> "$LOG" 2>&1\n'
+            out += f'{indent}nvidia-smi -i $i -lmc {eff["mem_lock"]},{eff["mem_lock"]} >> "$LOG" 2>&1\n'
+        if eff.get("power_limit") is not None:
+            out += f'{indent}nvidia-smi -i $i -pl {eff["power_limit"]} >> "$LOG" 2>&1\n'
+        if eff.get("fan_speed") is not None:
+            out += f'{indent}nvidia-settings -a "[gpu:$i]/GPUFanControlState=1" >> "$LOG" 2>&1\n'
+            out += f'{indent}nvidia-settings -a "[fan:$i]/GPUTargetFanSpeed={eff["fan_speed"]}" >> "$LOG" 2>&1\n'
+        return out
+
+    globals_ = {
+        "core_offset": profile.core_offset, "mem_offset": profile.mem_offset,
+        "core_lock":   profile.core_lock,   "mem_lock":   profile.mem_lock,
+        "power_limit": profile.power_limit, "fan_speed":  profile.fan_speed,
+    }
+
+    s = '#!/bin/bash\n'
+    s += 'LOG=/var/log/mfarm/oc.log\n'
+    s += 'mkdir -p /var/log/mfarm\n'
+    s += f'echo "===== OC {label} applying at $(date) =====" >> "$LOG"\n'
+    s += 'nvidia-smi -pm 1 >> "$LOG" 2>&1\n'
     s += '# Try X for nvidia-settings, fall back gracefully\n'
     s += 'if ! pgrep -x Xorg > /dev/null; then\n'
     s += '  nohup Xorg :0 -config /etc/X11/xorg.conf > /dev/null 2>&1 &\n  sleep 3\nfi\nexport DISPLAY=:0\n'
     s += 'GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l)\n'
     s += 'for i in $(seq 0 $((GPU_COUNT-1))); do\n'
-    if profile.core_offset is not None:
-        s += f'  nvidia-settings -a "[gpu:$i]/GPUGraphicsClockOffsetAllPerformanceLevels={profile.core_offset}" > /dev/null 2>&1 || true\n'
-    if profile.mem_offset is not None:
-        s += f'  nvidia-settings -a "[gpu:$i]/GPUMemoryTransferRateOffsetAllPerformanceLevels={profile.mem_offset}" > /dev/null 2>&1 || true\n'
-    if profile.core_lock is not None:
-        s += f'  nvidia-smi -i $i -lgc {profile.core_lock},{profile.core_lock} > /dev/null 2>&1\n'
-    if profile.mem_lock is not None:
-        s += f'  nvidia-smi -i $i -lmc {profile.mem_lock},{profile.mem_lock} > /dev/null 2>&1\n'
-    if profile.power_limit is not None:
-        s += f'  nvidia-smi -i $i -pl {profile.power_limit} > /dev/null 2>&1\n'
-    if profile.fan_speed is not None:
-        s += f'  nvidia-settings -a "[gpu:$i]/GPUFanControlState=1" > /dev/null 2>&1\n'
-        s += f'  nvidia-settings -a "[fan:$i]/GPUTargetFanSpeed={profile.fan_speed}" > /dev/null 2>&1\n'
+    s += '  echo "--- GPU $i ---" >> "$LOG"\n'
+
+    if not overrides:
+        s += _emit(globals_, '  ')
+    else:
+        s += '  case "$i" in\n'
+        for idx in sorted(overrides):
+            merged = {**globals_, **{k: v for k, v in overrides[idx].items()
+                                     if k != "gpu" and v is not None}}
+            s += f'    {idx})\n'
+            s += _emit(merged, '      ')
+            s += '      ;;\n'
+        s += '    *)\n'
+        s += _emit(globals_, '      ')
+        s += '      ;;\n'
+        s += '  esac\n'
+
     s += 'done\n'
-    s += 'nvidia-smi -pm 1 > /dev/null 2>&1\n'
-    s += f'echo "OC {label} applied at $(date)" >> /var/log/mfarm/oc.log\n'
+    # Snapshot what actually took. Operators reading oc.log can immediately
+    # see whether `-lgc` stuck (clocks.gr.lock vs. clocks.gr).
+    s += 'echo "--- post-apply state ---" >> "$LOG"\n'
+    s += 'nvidia-smi --query-gpu=index,name,clocks.gr,clocks.max.gr,power.limit,fan.speed,persistence_mode --format=csv,noheader >> "$LOG" 2>&1\n'
+    s += f'echo "===== OC {label} done at $(date) =====" >> "$LOG"\n'
+    # Make the log world-readable so the dashboard can tail it without sudo.
+    s += 'chmod 755 /var/log/mfarm 2>/dev/null || true\n'
+    s += 'chmod 644 "$LOG" 2>/dev/null || true\n'
     return s
+
+
+def _sudo_install_file(rig: Rig, content: str, path: str, mode: str) -> None:
+    """Write `content` to `path` on `rig` as root, bypassing SFTP.
+
+    paramiko's SFTP `open(path, "w")` fails with EACCES whenever a stale
+    root-owned file exists at the (typically /tmp) staging path. We avoid
+    /tmp entirely by base64-piping the content through `sudo tee` straight
+    to the destination — robust against any tmp permissions, ownership,
+    or chattr +i state.
+    """
+    pool = get_pool()
+    b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    qpath = shlex.quote(path)
+    cmd = (
+        f"echo {b64} | base64 -d | sudo tee {qpath} > /dev/null && "
+        f"sudo chmod {mode} {qpath}"
+    )
+    stdout, stderr, rc = pool.exec(rig, cmd, timeout=15)
+    if rc != 0:
+        raise RuntimeError(
+            f"sudo install of {path} failed (rc={rc}): {stderr.strip() or 'no stderr'}"
+        )
 
 
 async def _push_oc_to_rig(rig: Rig, profile: OcProfile, label: str) -> None:
@@ -1021,19 +1217,17 @@ async def _push_oc_to_rig(rig: Rig, profile: OcProfile, label: str) -> None:
            '[Install]\nWantedBy=multi-user.target\n')
 
     await loop.run_in_executor(
-        _executor, lambda: pool.upload_string(rig, oc_script, "/tmp/apply-oc.sh")
+        _executor, lambda: pool.exec(rig,
+            "sudo mkdir -p /opt/mfarm /var/log/mfarm", timeout=5)
+    )
+    await loop.run_in_executor(
+        _executor, lambda: _sudo_install_file(rig, oc_script, "/opt/mfarm/apply-oc.sh", "0755")
+    )
+    await loop.run_in_executor(
+        _executor, lambda: _sudo_install_file(rig, svc, "/etc/systemd/system/mfarm-oc.service", "0644")
     )
     await loop.run_in_executor(
         _executor, lambda: pool.exec(rig,
-            "sudo cp /tmp/apply-oc.sh /opt/mfarm/apply-oc.sh && sudo chmod +x /opt/mfarm/apply-oc.sh",
-            timeout=5)
-    )
-    await loop.run_in_executor(
-        _executor, lambda: pool.upload_string(rig, svc, "/tmp/mfarm-oc.service")
-    )
-    await loop.run_in_executor(
-        _executor, lambda: pool.exec(rig,
-            "sudo cp /tmp/mfarm-oc.service /etc/systemd/system/mfarm-oc.service && "
             "sudo systemctl daemon-reload && sudo systemctl enable mfarm-oc.service",
             timeout=10)
     )
@@ -1077,6 +1271,10 @@ class InlineOcBody(BaseModel):
     mem_lock: int | None = None
     power_limit: int | None = None
     fan_speed: int | None = None
+    # Optional per-GPU overrides. Each entry: {"gpu": <index>, "core_offset"?,
+    # "mem_offset"?, "core_lock"?, "mem_lock"?, "power_limit"?, "fan_speed"?}.
+    # Any field omitted on a per-GPU entry falls back to the global value above.
+    per_gpu: list[dict] | None = None
 
 
 def _inline_profile_name(rig_name: str) -> str:
@@ -1090,20 +1288,20 @@ def get_rig_oc(name: str):
     rig = Rig.get_by_name(db, name)
     if not rig:
         raise HTTPException(404, f"rig '{name}' not found")
+    empty = {"core_offset": None, "mem_offset": None, "core_lock": None,
+             "mem_lock": None, "power_limit": None, "fan_speed": None,
+             "per_gpu": None, "profile_name": None, "is_inline": False}
     if not rig.oc_profile_id:
-        return {"core_offset": None, "mem_offset": None, "core_lock": None,
-                "mem_lock": None, "power_limit": None, "fan_speed": None,
-                "profile_name": None, "is_inline": False}
+        return empty
     p = next((q for q in OcProfile.get_all(db) if q.id == rig.oc_profile_id), None)
     if not p:
-        return {"core_offset": None, "mem_offset": None, "core_lock": None,
-                "mem_lock": None, "power_limit": None, "fan_speed": None,
-                "profile_name": None, "is_inline": False}
+        return empty
     is_inline = p.name == _inline_profile_name(name)
     return {
         "core_offset": p.core_offset, "mem_offset": p.mem_offset,
         "core_lock": p.core_lock, "mem_lock": p.mem_lock,
         "power_limit": p.power_limit, "fan_speed": p.fan_speed,
+        "per_gpu": p.per_gpu,
         "profile_name": None if is_inline else p.name,
         "is_inline": is_inline,
     }
@@ -1131,6 +1329,7 @@ async def apply_rig_oc(name: str, body: InlineOcBody):
     p.mem_lock = body.mem_lock
     p.power_limit = body.power_limit
     p.fan_speed = body.fan_speed
+    p.per_gpu_overrides = json.dumps(body.per_gpu) if body.per_gpu else None
     p.save(db)
 
     rig.oc_profile_id = p.id
@@ -1140,7 +1339,31 @@ async def apply_rig_oc(name: str, body: InlineOcBody):
         await _push_oc_to_rig(rig, p, pname)
     except Exception as e:
         raise HTTPException(500, f"apply failed: {e}")
-    return {"status": "applied"}
+
+    # Tail oc.log so the UI can show what nvidia-smi/-settings actually said.
+    # Useful for diagnosing silent `-lgc` rejects on consumer cards. Always
+    # return a non-empty string so the operator can see *something*; if the
+    # log is missing, fall back to ls of the dir + script so we know whether
+    # the script even ran.
+    cmd = (
+        "echo '--- /var/log/mfarm/oc.log (tail 80) ---'; "
+        "(sudo tail -n 80 /var/log/mfarm/oc.log 2>&1 "
+        "  || tail -n 80 /var/log/mfarm/oc.log 2>&1 "
+        "  || echo '[oc.log unreadable]'); "
+        "echo; echo '--- ls /var/log/mfarm /opt/mfarm ---'; "
+        "ls -la /var/log/mfarm/ /opt/mfarm/apply-oc.sh 2>&1 || true"
+    )
+    log_tail = ""
+    try:
+        pool = get_pool()
+        loop = asyncio.get_event_loop()
+        stdout, _, _ = await loop.run_in_executor(
+            _executor, lambda: pool.exec(rig, cmd, timeout=5),
+        )
+        log_tail = stdout or "(empty stdout from tail; sudo may be unavailable)"
+    except Exception as e:
+        log_tail = f"(failed to read oc.log: {type(e).__name__}: {e})"
+    return {"status": "applied", "log": log_tail}
 
 
 @router.post("/rigs/{name}/oc/reset")
@@ -1283,6 +1506,14 @@ async def phonehome(body: dict):
     """Receive phone-home from a MeowOS rig."""
     from mfarm.web.app import _handle_phonehome, _discovered_rigs
     _handle_phonehome(body)
+    return {"status": "ok"}
+
+
+@router.post("/refresh")
+async def force_refresh():
+    """Wake the rig poller so the next /ws stats_update arrives immediately."""
+    from mfarm.web.app import _poll_wake
+    _poll_wake.set()
     return {"status": "ok"}
 
 

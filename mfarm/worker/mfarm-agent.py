@@ -14,11 +14,13 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from http.client import HTTPConnection
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 
 def sd_notify(state: str):
@@ -44,6 +46,10 @@ HWINFO_PATH = Path("/var/run/mfarm/hwinfo.json")
 MINER_LOG_PATH = Path("/var/log/mfarm/miner.log")
 AGENT_LOG_PATH = Path("/var/log/mfarm/agent.log")
 PID_PATH = Path("/var/run/mfarm/miner.pid")
+# Written by meowos-phonehome.py once it has located the console via UDP
+# broadcast or HTTP scan. Re-read on every push attempt so we pick up new
+# console URLs without restarting the agent.
+CONSOLE_URL_PATH = Path("/var/run/mfarm/console_url")
 
 # Ensure dirs exist
 for d in [STATS_PATH.parent, Path("/var/log/mfarm"), Path("/etc/mfarm")]:
@@ -77,6 +83,10 @@ class Config:
             "cpuminer-opt": 4048, "xmrig": 44445, "miniz": 20000,
             "rigel": 4067,
         }
+        # Bearer token for the console push/poll transport. Absence of a
+        # token disables the push client entirely (rig falls back to the
+        # legacy SSH-pull / file-based command path).
+        self.agent_token: str | None = None
 
     def load(self):
         if not CONFIG_PATH.exists():
@@ -96,6 +106,7 @@ class Config:
             self.oc_profile = data.get("oc_profile")
             self.miner_paths = data.get("miner_paths", {})
             self.api_ports = {**self.api_ports, **data.get("api_ports", {})}
+            self.agent_token = data.get("agent_token") or None
             log.info("Config loaded: flight_sheet=%s, oc=%s",
                      self.flight_sheet.get("name") if self.flight_sheet else None,
                      self.oc_profile.get("name") if self.oc_profile else None)
@@ -274,13 +285,16 @@ def get_cpu_stats() -> dict:
     except (OSError, ValueError, IndexError):
         pass
 
-    # Frequency
+    # Frequency (per-thread)
     try:
+        freqs = []
         with open("/proc/cpuinfo") as f:
             for line in f:
                 if "cpu MHz" in line:
-                    info["freq_mhz"] = round(float(line.split(":", 1)[1].strip()))
-                    break
+                    freqs.append(round(float(line.split(":", 1)[1].strip())))
+        if freqs:
+            info["freq_mhz"] = freqs[0]
+            info["per_thread_freq_mhz"] = freqs
     except (OSError, ValueError):
         pass
 
@@ -1039,9 +1053,14 @@ class MinerManager:
         elif miner == "srbminer":
             # SRBMiner takes WALLET and WORKER as separate flags, not the
             # WALLET.WORKER stratum-username form that ccminer/trex expect.
+            # `--disable-cpu`: this is a GPU farm; without it SRBMiner spawns
+            # its CPU mining threads alongside the GPU work and pegs ~2 cores
+            # per rig. (Confirmed via SRBMiner --help: the flag is
+            # `--disable-cpu`, NOT `--disable-cpu-mining`.)
             cmd = [binary, "--algorithm", algo, "--pool", pool,
                    "--wallet", wallet, "--worker", worker,
                    "--password", password,
+                   "--disable-cpu",
                    "--api-enable", "--api-port", str(port)]
 
         elif miner == "kerrigan":
@@ -1381,6 +1400,75 @@ class MinerManager:
         return self.start()
 
 
+# ── Console Push/Poll Transport ───────────────────────────────────────
+
+class PushClient:
+    """Outbound HTTP transport from rig agent to console.
+
+    Replaces the dashboard's SSH-cat-stats.json pull pattern. Three
+    operations:
+
+      push_stats(stats)       -> POST /api/agent/stats
+      poll(since_id) -> list  -> GET  /api/agent/poll  (blocks ~25s)
+      post_result(id, ...)    -> POST /api/agent/result
+
+    Console URL is re-read from CONSOLE_URL_PATH on every request, so
+    discovery via meowos-phonehome doesn't require an agent restart.
+    All errors propagate; callers decide retry policy.
+    """
+
+    def __init__(self, token: str):
+        self.token = token
+
+    def _console_url(self) -> str | None:
+        try:
+            url = CONSOLE_URL_PATH.read_text().strip()
+            return url or None
+        except OSError:
+            return None
+
+    def _req(self, method: str, path: str, body: bytes | None = None,
+             timeout: float = 30) -> dict:
+        base = self._console_url()
+        if not base:
+            raise RuntimeError("console URL unknown (phonehome not yet completed)")
+        req = urllib.request.Request(
+            base.rstrip("/") + path,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+            method=method,
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+        return json.loads(data) if data else {}
+
+    def push_stats(self, stats: dict) -> None:
+        self._req("POST", "/api/agent/stats",
+                  body=json.dumps(stats).encode(), timeout=10)
+
+    def poll(self, since: int) -> list[dict]:
+        # Server holds the request up to 25s (POLL_SECS); our 30s timeout
+        # leaves 5s of slack so a clean empty response wins the race vs.
+        # urlopen giving up.
+        return self._req("GET", f"/api/agent/poll?since={since}",
+                         timeout=30).get("commands", [])
+
+    def post_result(self, cmd_id: int, rc: int, stdout: str, stderr: str) -> None:
+        # Truncate output so a runaway command can't blow the request size.
+        # 4 KiB on each side covers normal command output; pathological
+        # cases get tail-only.
+        body = json.dumps({
+            "id": cmd_id,
+            "rc": rc,
+            "stdout": stdout[-4096:],
+            "stderr": stderr[-4096:],
+        }).encode()
+        self._req("POST", "/api/agent/result", body=body, timeout=10)
+
+
 # ── Main Agent Loop ───────────────────────────────────────────────────
 
 class Agent:
@@ -1389,10 +1477,22 @@ class Agent:
         self.miner = MinerManager(self.config)
         self.running = True
         self.zero_hashrate_count = 0
+        # Initialized in run() once config is loaded; None disables push.
+        self.push_client: PushClient | None = None
 
     def run(self):
         log.info("CatStack Agent v%s starting on %s", VERSION, socket.gethostname())
         self.config.load()
+
+        # Enable the push transport iff a token has been provisioned. No
+        # token → push_client stays None → _stats_loop skips push, _poll_loop
+        # exits immediately, and the rig keeps working via the legacy
+        # SSH-pull / file-based command path.
+        if self.config.agent_token:
+            self.push_client = PushClient(self.config.agent_token)
+            log.info("Push transport enabled")
+        else:
+            log.info("Push transport disabled (no agent_token in config)")
 
         # Start miner if ANY flight sheet is configured (GPU or CPU-only).
         # Before this was `if self.config.flight_sheet` which skipped startup
@@ -1406,10 +1506,12 @@ class Agent:
         stats_thread = threading.Thread(target=self._stats_loop, daemon=True)
         watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         command_thread = threading.Thread(target=self._command_loop, daemon=True)
+        poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
 
         stats_thread.start()
         watchdog_thread.start()
         command_thread.start()
+        poll_thread.start()
 
         # Main thread waits for signal
         signal.signal(signal.SIGTERM, self._shutdown)
@@ -1435,10 +1537,20 @@ class Agent:
 
     def _stats_loop(self):
         while self.running:
+            stats = None
             try:
-                self._collect_and_write_stats()
+                stats = self._collect_and_write_stats()
             except Exception as e:
                 log.error("Stats collection error: %s", e)
+            # Push to console if transport is enabled. Best-effort: a
+            # console outage or pre-discovery boot must NOT cripple stats
+            # collection — the local stats.json is still authoritative for
+            # meowos-webui and the SSH-pull path.
+            if stats is not None and self.push_client is not None:
+                try:
+                    self.push_client.push_stats(stats)
+                except Exception as e:
+                    log.debug("Stats push skipped: %s", e)
             time.sleep(self.config.stats_interval)
 
     def _watchdog_loop(self):
@@ -1450,7 +1562,13 @@ class Agent:
             time.sleep(self.config.watchdog_interval)
 
     def _command_loop(self):
-        """Watch for command file from console."""
+        """Watch for command file from console (legacy SSH-deposit path).
+
+        Kept active during rollout: even after a rig has a token configured,
+        the dashboard may still be SSH-pushing commands until every endpoint
+        has been migrated to the queue. Both paths converge on
+        _handle_command, so behavior is the same either way.
+        """
         while self.running:
             try:
                 if COMMAND_PATH.exists():
@@ -1461,6 +1579,89 @@ class Agent:
             except Exception as e:
                 log.error("Command handler error: %s", e)
             time.sleep(2)
+
+    def _poll_loop(self):
+        """Long-poll the console for queued commands.
+
+        Exits immediately when the push transport is disabled (no token).
+        Otherwise loops forever: on each cycle the GET /api/agent/poll
+        request blocks server-side up to 25s. Network failures (no console
+        URL, console down, DNS) trigger a 5s back-off; the agent never
+        crashes the daemon over a transport hiccup.
+        """
+        if self.push_client is None:
+            return
+        last_id = 0
+        while self.running:
+            try:
+                commands = self.push_client.poll(last_id)
+                for cmd in commands:
+                    last_id = max(last_id, cmd["id"])
+                    rc, out, err = self._dispatch_remote(
+                        cmd.get("cmd", ""), cmd.get("args") or {}
+                    )
+                    try:
+                        self.push_client.post_result(cmd["id"], rc, out, err)
+                    except Exception as e:
+                        log.warning("post_result failed for cmd %s: %s",
+                                    cmd.get("id"), e)
+            except urllib.error.URLError as e:
+                # Console unreachable / not yet discovered. Quiet log:
+                # the failure is expected at boot before phonehome runs.
+                log.debug("poll URLError: %s", e)
+                time.sleep(5)
+            except RuntimeError as e:
+                # Raised by PushClient when CONSOLE_URL_PATH isn't populated yet.
+                log.debug("poll skipped: %s", e)
+                time.sleep(5)
+            except Exception as e:
+                log.warning("poll error: %s", e)
+                time.sleep(5)
+
+    def _dispatch_remote(self, cmd: str, args: dict) -> tuple[int, str, str]:
+        """Execute a command received over the long-poll channel.
+
+        Returns (rc, stdout, stderr). Reuses _handle_command for the
+        legacy commands so adding a new local command type only needs one
+        edit. Adds two transport-only commands:
+
+          reboot:  systemctl reboot (returns immediately; the agent dies
+                   before any post_result, so the dashboard sees the
+                   command timing out — that's the correct signal).
+          exec:    args = {"cmd": "...", "timeout": N}. Runs in a shell.
+                   Used during rollout to validate the round-trip and to
+                   cover the long tail of one-off ops that don't deserve
+                   their own command type.
+        """
+        try:
+            if cmd in ("restart_miner", "stop_miner", "start_miner",
+                       "apply_config", "update_agent"):
+                self._handle_command(cmd)
+                return (0, f"{cmd} dispatched", "")
+            if cmd == "reboot":
+                subprocess.Popen(["systemctl", "reboot"])
+                return (0, "reboot scheduled", "")
+            if cmd == "exec":
+                shell_cmd = args.get("cmd", "")
+                if not shell_cmd:
+                    return (1, "", "missing args.cmd")
+                timeout = args.get("timeout", 30)
+                # bash -lc matches what the dashboard's SSH path does
+                # (api.py wraps with `bash -lc {shlex.quote(cmd)}`), so
+                # /etc/profile.d/* aliases like `miner start|stop|restart`
+                # resolve identically whether the dashboard came in via
+                # the agent or via SSH. No `shell=True` — argv form skips
+                # an unnecessary `sh -c` layer.
+                r = subprocess.run(
+                    ["bash", "-lc", shell_cmd],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                return (r.returncode, r.stdout, r.stderr)
+            return (1, "", f"unknown command: {cmd!r}")
+        except subprocess.TimeoutExpired as e:
+            return (124, "", f"timeout: {e}")
+        except Exception as e:
+            return (1, "", f"{type(e).__name__}: {e}")
 
     def _handle_command(self, cmd: str):
         log.info("Received command: %s", cmd)
@@ -1587,11 +1788,14 @@ class Agent:
             "gpu_pool_ping_ms": gpu_pool_ping,
             "cpu_pool_ping_ms": cpu_pool_ping,
         }
+        if _vastai_is_active():
+            stats["_vastai_active"] = True
 
         # Atomic write
         tmp = STATS_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(stats, indent=2))
         tmp.rename(STATS_PATH)
+        return stats
 
     def _watchdog_check(self):
         """Check miner health and GPU temps."""
@@ -1676,6 +1880,25 @@ def _run_quiet(cmd: list[str]) -> int:
         return result.returncode
     except Exception:
         return -1
+
+
+def _vastai_is_active() -> bool:
+    """True iff `systemctl is-active vastai` returns exactly 'active'.
+
+    Mirrors the dashboard's SSH-probe check (web/app.py:_poll_one) so that
+    rigs running both Vast.ai and mfarm-agent (e.g. CPU-mining alongside
+    GPU rental) still get the VAST status badge. Without this, the agent's
+    push payload short-circuits the SSH probe and the rig appears as a
+    plain mining rig.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "vastai"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip() == "active"
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

@@ -18,7 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from mfarm.db.connection import get_db
 from mfarm.db.models import Rig, FlightSheet, OcProfile, Group
 from mfarm.ssh.pool import get_pool
-from mfarm.web.api import router as api_router
+from mfarm.web import agent_state
+from mfarm.web.api import router as api_router, PUSH_STATS_TTL_SECS
+from mfarm.web.agent_api import router as agent_router
 
 log = logging.getLogger(__name__)
 
@@ -29,33 +31,118 @@ _stats_cache: dict[str, dict | None] = {}
 _stats_errors: dict[str, str | None] = {}
 _poll_task: asyncio.Task | None = None
 _ws_clients: set[WebSocket] = set()
+# Set by POST /api/refresh (or any other early-wake source) to skip the
+# 2-second sleep and re-poll immediately.
+_poll_wake: asyncio.Event = asyncio.Event()
+
+# Per-rig timestamp of the last rig_snapshots row we wrote. Used to throttle
+# inserts to ~once per minute even though the poll loop runs every 2s.
+_last_snapshot: dict[str, float] = {}
+SNAPSHOT_INTERVAL_SECS = 60
+
+
+def _record_snapshots(now: float):
+    """Insert one row per online rig into rig_snapshots, throttled to ~60s.
+
+    Reads from _stats_cache (populated by the poll loop). Skips rigs that are
+    offline (stats is None) — empty rows just clutter the chart.
+    """
+    db = get_db()
+    rows_to_insert = []
+    for rig_name, stats in list(_stats_cache.items()):
+        if not stats:
+            continue
+        if now - _last_snapshot.get(rig_name, 0) < SNAPSHOT_INTERVAL_SECS:
+            continue
+        m = stats.get("miner") or {}
+        cm = stats.get("cpu_miner") or {}
+        # Pick the active miner the same way the dashboard cards do.
+        active = m if m.get("running") else (cm if cm.get("running") else m)
+        hr = active.get("hashrate") or 0
+        algo = active.get("algo") or active.get("name") or "unknown"
+        gpu_pwr = sum((g.get("power_draw") or 0) for g in (stats.get("gpus") or []))
+        cpu_pwr = (stats.get("cpu") or {}).get("power_draw") or 0
+        pwr = gpu_pwr + cpu_pwr
+        acc = (m.get("accepted") or 0) + (cm.get("accepted") or 0)
+        rej = (m.get("rejected") or 0) + (cm.get("rejected") or 0)
+        row = db.execute("SELECT id FROM rigs WHERE name = ?", (rig_name,)).fetchone()
+        if not row:
+            continue
+        rows_to_insert.append((row[0], hr, pwr, algo, acc, rej))
+        _last_snapshot[rig_name] = now
+    if rows_to_insert:
+        db.executemany(
+            "INSERT INTO rig_snapshots (rig_id, hashrate, power_draw, algo, accepted, rejected) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows_to_insert,
+        )
+        db.commit()
+
+
+def _take_pushed_stats(rig: Rig) -> dict | None:
+    """If the rig's agent has pushed within PUSH_STATS_TTL_SECS, return that
+    cached payload. Otherwise None — caller should fall back to SSH.
+
+    Vast.ai hosts mask mfarm-agent (see _poll_one) and therefore cannot push,
+    so they will always fall through to the SSH branch — that's where the
+    `_vastai_active` flag gets attached, which the dashboard renders as a
+    distinct status.
+    """
+    if agent_state.stats_age(rig.id) >= PUSH_STATS_TTL_SECS:
+        return None
+    return agent_state.get(rig.id).last_stats
 
 
 async def poll_all_rigs():
-    """Background task that polls rig stats and pushes to WebSocket clients."""
+    """Background task that polls rig stats and pushes to WebSocket clients.
+
+    Two-phase: pushed rigs are taken from the in-memory cache (zero SSH
+    cost), the remainder are SSH-probed in parallel. As more of the fleet
+    moves onto the push transport the SSH fan-out shrinks correspondingly.
+    """
     global _stats_cache, _stats_errors
     pool = get_pool()
-    executor = ThreadPoolExecutor(max_workers=10)
+    # One worker per rig so a slow SSH probe never blocks others. 50 covers
+    # the current fleet (~41 rigs) with headroom; threads are cheap.
+    executor = ThreadPoolExecutor(max_workers=50)
 
     while True:
         try:
             db = get_db()
             rigs = Rig.get_all(db)
 
-            if rigs:
+            need_ssh: list[Rig] = []
+            for rig in rigs:
+                pushed = _take_pushed_stats(rig)
+                if pushed is not None:
+                    _stats_cache[rig.name] = pushed
+                    _stats_errors[rig.name] = None
+                else:
+                    need_ssh.append(rig)
+
+            if need_ssh:
                 loop = asyncio.get_event_loop()
                 futures = []
-                for rig in rigs:
+                for rig in need_ssh:
                     futures.append((rig, loop.run_in_executor(executor, _poll_one, pool, rig)))
 
                 for rig, future in futures:
                     try:
-                        stats = await asyncio.wait_for(future, timeout=10)
+                        # Outer cap slightly above _poll_one's SSH timeout so a
+                        # single hung rig can't stall the whole cycle past 2s.
+                        stats = await asyncio.wait_for(future, timeout=4)
                         _stats_cache[rig.name] = stats
                         _stats_errors[rig.name] = None
                     except Exception as e:
                         _stats_cache[rig.name] = None
                         _stats_errors[rig.name] = str(e)
+
+            # Persist a snapshot row per rig (throttled inside) so the
+            # per-rig hashrate/power history charts have data.
+            try:
+                _record_snapshots(time.time())
+            except Exception as e:
+                log.error("Snapshot record error: %s", e)
 
             # Push to all WebSocket clients
             payload = json.dumps({
@@ -76,7 +163,13 @@ async def poll_all_rigs():
         except Exception as e:
             log.error("Poll error: %s", e)
 
-        await asyncio.sleep(2)
+        # Sleep up to 2s, but wake immediately if anyone (e.g. the Refresh
+        # button) sets _poll_wake.
+        try:
+            await asyncio.wait_for(_poll_wake.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+        _poll_wake.clear()
 
 
 def _poll_one(pool, rig: Rig) -> dict | None:
@@ -110,7 +203,7 @@ def _poll_one(pool, rig: Rig) -> dict | None:
             "VAST=$(systemctl is-active vastai 2>/dev/null); echo \"${VAST:-missing}\"; "
             "cat /var/run/mfarm/stats.json 2>/dev/null"
         )
-        stdout, _, rc = pool.exec(rig, cmd, timeout=5)
+        stdout, _, rc = pool.exec(rig, cmd, timeout=3)
         if rc != 0 or not stdout.startswith("OK_REACHABLE"):
             return None
         lines = stdout.split("\n", 2)
@@ -370,6 +463,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MeowFarm Dashboard", lifespan=lifespan)
 app.include_router(api_router, prefix="/api")
+app.include_router(agent_router, prefix="/api/agent")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 

@@ -434,6 +434,8 @@ main { padding: 20px 24px; }
       <div class="value" id="total-accepted">-</div>
       <div class="label">Accepted</div>
     </div>
+    <button class="btn" id="refresh-btn" onclick="forceRefresh()" title="Force re-poll all rigs now"
+      style="margin-left:8px;align-self:center">↻ Refresh</button>
   </div>
 </header>
 
@@ -748,7 +750,7 @@ async function openRig(name) {
     <div class="card-row"><span class="label">OC Profile</span><span class="value">${r.oc_profile || '-'}</span></div>
     <div class="card-row"><span class="label">Uptime</span><span class="value">${s.uptime_secs ? fmtUptime(s.uptime_secs) : '-'}</span></div>
     <div class="card-row"><span class="label">CPU Temp</span><span class="value" style="${(cpu.temp||0) >= 80 ? 'color:var(--red)' : (cpu.temp||0) >= 65 ? 'color:var(--yellow)' : 'color:var(--green)'}">${cpu.temp ? cpu.temp + 'C' : '-'}</span></div>
-    <div class="card-row"><span class="label">CPU Freq</span><span class="value">${cpu.freq_mhz ? cpu.freq_mhz + ' MHz' : '-'}</span></div>
+    <div class="card-row" ${cpu.per_thread_freq_mhz ? `style="cursor:pointer" onclick="const e=document.getElementById('cpu-threads-${name}');const c=document.getElementById('cpu-threads-caret-${name}');e.style.display=e.style.display==='none'?'block':'none';c.textContent=e.style.display==='none'?'▸':'▾'"` : ''}><span class="label">CPU Freq${cpu.per_thread_freq_mhz ? ' <span id="cpu-threads-caret-' + name + '" style="color:var(--text-dim)">▸</span>' : ''}</span><span class="value">${cpu.freq_mhz ? cpu.freq_mhz + ' MHz' : '-'}</span></div>${cpu.per_thread_freq_mhz ? `<div id="cpu-threads-${name}" style="display:none;padding:6px 0 10px 0"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:4px 12px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)">${cpu.per_thread_freq_mhz.map((f,i) => `<div><span style="color:var(--text-dim)">T${i}</span> ${f} MHz</div>`).join('')}</div></div>` : ''}
     <div class="card-row"><span class="label">CPU Power</span><span class="value">${cpu.power_draw != null ? cpu.power_draw.toFixed(1) + 'W' : '-'}</span></div>
     <div class="card-row"><span class="label">CPU Usage</span><span class="value">${cpu.usage_pct != null ? cpu.usage_pct + '%' : '-'}</span></div>
     <div class="card-row"><span class="label">Load</span><span class="value">${sys.load_1m ?? '-'}</span></div>
@@ -825,10 +827,14 @@ async function openRig(name) {
     </div>`;
   }
 
-  // Hashrate history chart
+  // Hashrate + Power history charts (data populated by loadHashrateChart)
   html += `<div class="detail-section">
     <h3>Hashrate (24h)</h3>
     <div style="position:relative;height:200px;margin-top:8px"><canvas id="hr-chart"></canvas></div>
+  </div>
+  <div class="detail-section">
+    <h3>Power (24h)</h3>
+    <div style="position:relative;height:200px;margin-top:8px"><canvas id="pw-chart"></canvas></div>
   </div>`;
 
   // Miner section(s) — show GPU and CPU separately when both are running
@@ -867,10 +873,15 @@ async function openRig(name) {
   // ── GPU Overclock (inline, HiveOS-style) ──
   // Six direct-input fields. Empty = leave that setting alone / clear it.
   // Values are loaded async in populateOcCard() right after the modal opens.
+  // Prefix is `inline-oc-` (not `oc-`) so these IDs can't collide with the
+  // static "Create OC Profile" form on the OC Profiles tab, which already
+  // uses `oc-core-lock` / `oc-mem-lock`. When both forms exist in the DOM,
+  // getElementById returned the *static* (empty) one, so user-typed locks
+  // were silently dropped on Apply.
   const ocInput = (id, label, unit, placeholder) => `
     <div style="flex:1;min-width:150px">
       <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em">${label} <span style="color:var(--text-dim);text-transform:none">${unit}</span></label>
-      <input type="number" id="oc-${id}" placeholder="${placeholder || ''}"
+      <input type="number" id="inline-oc-${id}" placeholder="${placeholder || ''}"
         style="width:100%;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;font-family:monospace">
     </div>`;
   html += `<div class="detail-section">
@@ -885,6 +896,13 @@ async function openRig(name) {
       ${ocInput('mem-lock',    'Memory Clock Lock', 'MHz', 'e.g. 9500')}
       ${ocInput('power-limit', 'Power Limit', 'W',   'e.g. 220')}
       ${ocInput('fan-speed',   'Fan Speed',   '%',   'e.g. 70')}
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-muted);user-select:none">
+        <input type="checkbox" id="oc-pergpu-toggle" onchange="togglePerGpuOc('${name}')">
+        Per-GPU overrides (each card can set its own values; empty fields fall back to the global above)
+      </label>
+      <div id="oc-pergpu-rows" style="display:none;margin-top:10px"></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn success" onclick="applyInlineOc('${name}')">Apply</button>
@@ -977,12 +995,12 @@ async function populateOcCard(rigName) {
       const el = document.getElementById(id);
       if (el) el.value = (v == null ? '' : v);
     };
-    setIf('oc-core-offset', oc.core_offset);
-    setIf('oc-mem-offset',  oc.mem_offset);
-    setIf('oc-core-lock',   oc.core_lock);
-    setIf('oc-mem-lock',    oc.mem_lock);
-    setIf('oc-power-limit', oc.power_limit);
-    setIf('oc-fan-speed',   oc.fan_speed);
+    setIf('inline-oc-core-offset', oc.core_offset);
+    setIf('inline-oc-mem-offset',  oc.mem_offset);
+    setIf('inline-oc-core-lock',   oc.core_lock);
+    setIf('inline-oc-mem-lock',    oc.mem_lock);
+    setIf('inline-oc-power-limit', oc.power_limit);
+    setIf('inline-oc-fan-speed',   oc.fan_speed);
     const tag = document.getElementById('oc-profile-tag');
     if (tag) {
       if (oc.profile_name) {
@@ -993,7 +1011,103 @@ async function populateOcCard(rigName) {
         tag.textContent = 'no OC applied';
       }
     }
+    // Auto-expand the per-GPU section if this rig already has per-card overrides.
+    if (oc.per_gpu && oc.per_gpu.length) {
+      const t = document.getElementById('oc-pergpu-toggle');
+      if (t && !t.checked) { t.checked = true; togglePerGpuOc(rigName); }
+      // Apply saved per-GPU values onto the rendered rows
+      for (const ov of oc.per_gpu) {
+        const gi = ov.gpu;
+        if (typeof gi !== 'number') continue;
+        ['core_offset','mem_offset','core_lock','mem_lock','power_limit','fan_speed'].forEach(k => {
+          const el = document.getElementById(`oc-g${gi}-${k.replace('_','-')}`);
+          if (el && ov[k] != null) el.value = ov[k];
+        });
+      }
+    }
   } catch(e) { /* first-time rig, fields just stay empty */ }
+}
+
+function togglePerGpuOc(rigName) {
+  const wrap = document.getElementById('oc-pergpu-rows');
+  const toggle = document.getElementById('oc-pergpu-toggle');
+  if (!wrap || !toggle) return;
+  if (!toggle.checked) {
+    wrap.style.display = 'none';
+    return;
+  }
+  const gpus = ((rigData[rigName] || {}).stats || {}).gpus || [];
+  if (!gpus.length) {
+    wrap.innerHTML = '<p style="color:var(--text-dim);font-size:12px">No GPUs reported by this rig yet — wait for the next stats poll, then re-toggle.</p>';
+    wrap.style.display = 'block';
+    return;
+  }
+  const cellInput = (gi, key, ph) => `
+    <input type="number" id="oc-g${gi}-${key}" placeholder="${ph}"
+      style="width:100%;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:monospace">`;
+  let html = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr style="color:var(--text-muted);text-align:left">
+      <th style="padding:4px 6px">GPU</th>
+      <th style="padding:4px 6px">Name</th>
+      <th style="padding:4px 6px">Core (MHz)</th>
+      <th style="padding:4px 6px">Mem (MHz)</th>
+      <th style="padding:4px 6px">Core Lock</th>
+      <th style="padding:4px 6px">Mem Lock</th>
+      <th style="padding:4px 6px">PL (W)</th>
+      <th style="padding:4px 6px">Fan (%)</th>
+    </tr></thead><tbody>`;
+  for (const g of gpus) {
+    const gi = g.index ?? 0;
+    html += `<tr>
+      <td style="padding:4px 6px;font-family:monospace">${gi}</td>
+      <td style="padding:4px 6px;color:var(--text-muted)">${(g.name || '').replace(/NVIDIA GeForce /,'')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'core-offset', 'inherit')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'mem-offset',  'inherit')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'core-lock',   'inherit')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'mem-lock',    'inherit')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'power-limit', 'inherit')}</td>
+      <td style="padding:4px 6px">${cellInput(gi, 'fan-speed',   'inherit')}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+  wrap.style.display = 'block';
+}
+
+function readPerGpuInputs() {
+  const wrap = document.getElementById('oc-pergpu-rows');
+  const toggle = document.getElementById('oc-pergpu-toggle');
+  if (!wrap || !toggle || !toggle.checked) return null;
+  const num = el => {
+    if (!el || el.value === '' || el.value == null) return null;
+    const v = parseInt(el.value, 10);
+    return Number.isFinite(v) ? v : null;
+  };
+  const out = [];
+  // Inputs are id'd as oc-g<idx>-<field>; iterate every input under the wrap.
+  const seen = new Set();
+  wrap.querySelectorAll('input[type=number]').forEach(el => {
+    const m = el.id.match(/^oc-g(\d+)-(.+)$/);
+    if (!m) return;
+    const gi = parseInt(m[1], 10);
+    if (seen.has(gi)) return;
+    seen.add(gi);
+    const get = key => num(document.getElementById(`oc-g${gi}-${key}`));
+    const entry = {
+      gpu: gi,
+      core_offset: get('core-offset'),
+      mem_offset:  get('mem-offset'),
+      core_lock:   get('core-lock'),
+      mem_lock:    get('mem-lock'),
+      power_limit: get('power-limit'),
+      fan_speed:   get('fan-speed'),
+    };
+    // Drop entries where the user left every field blank — nothing to override.
+    const hasAny = ['core_offset','mem_offset','core_lock','mem_lock','power_limit','fan_speed']
+      .some(k => entry[k] != null);
+    if (hasAny) out.push(entry);
+  });
+  return out.length ? out : null;
 }
 
 function readOcInputs() {
@@ -1004,18 +1118,21 @@ function readOcInputs() {
     return Number.isFinite(num) ? num : null;
   };
   return {
-    core_offset: n('oc-core-offset'),
-    mem_offset:  n('oc-mem-offset'),
-    core_lock:   n('oc-core-lock'),
-    mem_lock:    n('oc-mem-lock'),
-    power_limit: n('oc-power-limit'),
-    fan_speed:   n('oc-fan-speed'),
+    core_offset: n('inline-oc-core-offset'),
+    mem_offset:  n('inline-oc-mem-offset'),
+    core_lock:   n('inline-oc-core-lock'),
+    mem_lock:    n('inline-oc-mem-lock'),
+    power_limit: n('inline-oc-power-limit'),
+    fan_speed:   n('inline-oc-fan-speed'),
+    per_gpu:     readPerGpuInputs(),
   };
 }
 
 function clearOcInputs() {
-  ['oc-core-offset','oc-mem-offset','oc-core-lock','oc-mem-lock','oc-power-limit','oc-fan-speed']
+  ['inline-oc-core-offset','inline-oc-mem-offset','inline-oc-core-lock','inline-oc-mem-lock','inline-oc-power-limit','inline-oc-fan-speed']
     .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const wrap = document.getElementById('oc-pergpu-rows');
+  if (wrap) wrap.querySelectorAll('input[type=number]').forEach(el => { el.value = ''; });
   const r = document.getElementById('oc-result');
   if (r) r.innerHTML = '<span style="color:var(--text-muted)">Fields cleared. Click Apply to push empty (skip all).</span>';
 }
@@ -1032,7 +1149,19 @@ async function applyInlineOc(rigName) {
     });
     const data = await res.json();
     if (res.ok) {
-      if (result) result.innerHTML = `<span style="color:var(--green)">✓ ${data.status || 'applied'}</span>`;
+      let msg = `<span style="color:var(--green)">✓ ${data.status || 'applied'}</span>`;
+      // Always render the dropdown — even if empty we want the operator to
+      // see *something* so a missing/unreadable oc.log isn't invisible.
+      const raw = (data.log == null ? '(server returned no log field — old web service?)' : data.log) || '(empty)';
+      const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const log = esc(raw).split('\n').map(line => {
+        if (/error|fail|not supported|denied|invalid/i.test(line))
+          return `<span style="color:var(--red)">${line}</span>`;
+        return line;
+      }).join('\n');
+      msg += `<details style="margin-top:6px" open><summary style="cursor:pointer;color:var(--text-muted);font-size:12px">/var/log/mfarm/oc.log tail</summary>
+        <pre style="max-height:280px;overflow:auto;background:var(--bg3);padding:8px;border-radius:4px;font-size:11px;margin-top:4px;white-space:pre-wrap">${log}</pre></details>`;
+      if (result) result.innerHTML = msg;
       if (typeof toast === 'function') toast(`OC applied to ${rigName}`);
     } else {
       if (result) result.innerHTML = `<span style="color:var(--red)">${data.detail || JSON.stringify(data)}</span>`;
@@ -1086,6 +1215,7 @@ async function saveOcAsProfile(rigName) {
 }
 
 let _hrChart = null;
+let _pwChart = null;
 
 // Palette for per-algo series. Picked to be distinguishable on dark bg.
 const ALGO_COLORS = [
@@ -1120,14 +1250,18 @@ function scaleForAlgo(algo) {
 }
 
 async function loadHashrateChart(rigName) {
-  const canvas = document.getElementById('hr-chart');
-  if (!canvas) return;
+  const hrCanvas = document.getElementById('hr-chart');
+  const pwCanvas = document.getElementById('pw-chart');
+  if (!hrCanvas && !pwCanvas) return;
   try {
     const res = await fetch(`/api/rigs/${rigName}/history?hours=24`);
     const data = await res.json();
     if (_hrChart) { _hrChart.destroy(); _hrChart = null; }
+    if (_pwChart) { _pwChart.destroy(); _pwChart = null; }
     if (!data.length) {
-      canvas.parentElement.innerHTML = '<p style="color:var(--text-dim);text-align:center;padding:40px 0">No history yet. Data accumulates every 60 seconds.</p>';
+      const msg = '<p style="color:var(--text-dim);text-align:center;padding:40px 0">No history yet. Data accumulates every 60 seconds.</p>';
+      if (hrCanvas) hrCanvas.parentElement.innerHTML = msg;
+      if (pwCanvas) pwCanvas.parentElement.innerHTML = msg;
       return;
     }
 
@@ -1135,11 +1269,10 @@ async function loadHashrateChart(rigName) {
       const dt = new Date(d.t + 'Z');
       return dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     });
-    const pwData = data.map(d => d.power);
 
-    // Build one hashrate series per distinct algo. Each sample only appears
-    // in its own algo's series (other algos get null at that index), so
-    // switching algos produces a real visible gap instead of a spurious
+    // ── Hashrate chart: one series per distinct algo. Each sample only
+    // appears in its own algo's series (other algos get null at that index),
+    // so switching algos produces a real visible gap instead of a spurious
     // jump from 500 Sol/s to 20k H/s on one continuous line.
     const algos = [];
     for (const d of data) {
@@ -1158,69 +1291,93 @@ async function loadHashrateChart(rigName) {
         label: `${algo} (${unit})`,
         data: series,
         borderColor: color,
-        backgroundColor: color + '22', // ~13% alpha
-        fill: algos.length === 1,      // only fill if one algo (cleaner visual)
+        backgroundColor: color + '22',
+        fill: algos.length === 1,
         tension: 0.3, pointRadius: 0, borderWidth: 2,
-        yAxisID: 'y',
-        spanGaps: false,               // draw a gap when algo is not active
+        spanGaps: false,
       };
     });
 
-    const datasets = [
-      ...hashrateDatasets,
-      { label: 'Power (W)', data: pwData, borderColor: '#f59e0b',
-        backgroundColor: 'transparent', fill: false, tension: 0.3,
-        pointRadius: 0, borderWidth: 1.5, yAxisID: 'y1' },
-    ];
-
-    // Decide the left-axis title. If every sample is the same algo we can
-    // use that algo's natural unit; otherwise we show the dominant algo's
-    // unit and rely on the legend to disambiguate.
     const dominant = algos[0] || '';
     const unitLabel = unitForAlgo(dominant);
 
-    _hrChart = new Chart(canvas, {
-      type: 'line',
-      data: { labels, datasets },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { labels: { color: '#aaa', boxWidth: 12, font: { size: 11 } } },
-          tooltip: {
-            callbacks: {
-              // Show the unit next to the value so mixed-algo tooltips are readable.
-              label: (ctx) => {
-                const v = ctx.parsed.y;
-                if (v == null) return null;
-                return `${ctx.dataset.label}: ${v.toFixed(2)}`;
-              },
+    const baseOpts = {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#aaa', boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              if (v == null) return null;
+              return `${ctx.dataset.label}: ${v.toFixed(2)}`;
             },
           },
         },
-        scales: {
-          x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 10 } },
-               grid: { color: 'rgba(255,255,255,0.05)' } },
-          y: { position: 'left',
-               ticks: { color: '#00d4aa', font: { size: 10 } },
-               grid: { color: 'rgba(255,255,255,0.05)' },
-               title: { display: true, text: `Hashrate (${unitLabel})`,
-                        color: '#00d4aa', font: { size: 10 } } },
-          y1: { position: 'right',
-                ticks: { color: '#f59e0b', font: { size: 10 } },
-                grid: { drawOnChartArea: false },
-                title: { display: true, text: 'Watts',
-                         color: '#f59e0b', font: { size: 10 } } },
-        },
       },
-    });
+      scales: {
+        x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 10 } },
+             grid: { color: 'rgba(255,255,255,0.05)' } },
+      },
+    };
+
+    if (hrCanvas) {
+      _hrChart = new Chart(hrCanvas, {
+        type: 'line',
+        data: { labels, datasets: hashrateDatasets },
+        options: {
+          ...baseOpts,
+          scales: {
+            ...baseOpts.scales,
+            y: { position: 'left', beginAtZero: true,
+                 ticks: { color: '#00d4aa', font: { size: 10 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' },
+                 title: { display: true, text: `Hashrate (${unitLabel})`,
+                          color: '#00d4aa', font: { size: 10 } } },
+          },
+        },
+      });
+    }
+
+    // ── Power chart: single series, total watts over time.
+    if (pwCanvas) {
+      const pwData = data.map(d => d.power || 0);
+      _pwChart = new Chart(pwCanvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Power (W)',
+            data: pwData,
+            borderColor: '#f59e0b',
+            backgroundColor: 'rgba(245, 158, 11, 0.13)',
+            fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2,
+          }],
+        },
+        options: {
+          ...baseOpts,
+          scales: {
+            ...baseOpts.scales,
+            y: { position: 'left', beginAtZero: true,
+                 ticks: { color: '#f59e0b', font: { size: 10 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' },
+                 title: { display: true, text: 'Watts',
+                          color: '#f59e0b', font: { size: 10 } } },
+          },
+        },
+      });
+    }
   } catch(e) {
-    canvas.parentElement.innerHTML = `<p style="color:var(--red);text-align:center">Failed to load history: ${e.message}</p>`;
+    const msg = `<p style="color:var(--red);text-align:center">Failed to load history: ${e.message}</p>`;
+    if (hrCanvas && hrCanvas.parentElement) hrCanvas.parentElement.innerHTML = msg;
+    if (pwCanvas && pwCanvas.parentElement) pwCanvas.parentElement.innerHTML = msg;
   }
 }
 
 function closeModal() {
   if (_hrChart) { _hrChart.destroy(); _hrChart = null; }
+  if (_pwChart) { _pwChart.destroy(); _pwChart = null; }
   document.getElementById('modal').classList.remove('active');
 }
 
@@ -2198,6 +2355,22 @@ setInterval(async () => {
     renderDiscovered(rigs);
   } catch(e) {}
 }, 15000);
+
+// Force the server to re-poll all rigs immediately. The next stats_update
+// over the WebSocket will replace card contents — we don't reload here.
+async function forceRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⟳ refreshing...';
+  try {
+    await fetch('/api/refresh', { method: 'POST' });
+    // Also kick the discovered popup since it's on a slower 15s interval.
+    fetch('/api/discovered').then(r => r.json()).then(renderDiscovered).catch(() => {});
+  } catch(e) {}
+  setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 800);
+}
 
 // ── Target picker (dropdown instead of prompt) ──
 

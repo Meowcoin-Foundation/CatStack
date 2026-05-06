@@ -186,6 +186,140 @@ def rig_reboot(target, force):
             console.print(f"[green]{rig.name}: reboot sent[/green]")
 
 
+@rig_group.command("pilot")
+@click.argument("name")
+@click.option("--rotate-existing", is_flag=True,
+              help="Force re-issue even if a token is already deployed.")
+def rig_pilot(name, rotate_existing):
+    """Enroll a rig in the agent push transport.
+
+    Rotates a fresh agent token, writes it into /etc/mfarm/config.json on
+    the rig, restarts mfarm-agent, and verifies the agent's journal shows
+    "Push transport enabled". Idempotent — safe to re-run; each run issues
+    a new token (the previous one is invalidated server-side immediately).
+
+    Pre-requisite: the rig must already be running mfarm-agent v0.2.0+.
+    The fleet auto-updates from /api/agent/bundle every 5 min, so you
+    typically just bump the project VERSION, wait, then run this.
+    """
+    import json as _json
+    import secrets as _secrets
+    import time as _time
+
+    from mfarm.ssh.pool import get_pool
+
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if rig is None:
+        raise click.ClickException(f"Rig '{name}' not found")
+
+    if rig.agent_token and not rotate_existing:
+        # Don't silently rotate — the previous token may be in someone's
+        # config and we'd lock them out without warning. The flag opt-in
+        # makes the rotation explicit.
+        if not click.confirm(
+            f"Rig '{name}' already has a token deployed. Rotate it?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    pool = get_pool()
+    console.print(f"[bold]Piloting {rig.name} ({rig.host})...[/bold]")
+
+    # 1. Pre-flight: confirm the rig is running an agent that knows about
+    # agent_token. Greps the live agent file for the VERSION line; the
+    # auto-updater swaps that file in place when the bundle pulls a newer
+    # release. If it's still 0.1.x, refuse — deploying a token to an old
+    # agent would have no effect and the operator would see stats fall
+    # through to SSH with no signal that anything was wrong.
+    try:
+        out, _, rc = pool.exec(
+            rig,
+            "grep -m1 '^VERSION = ' /opt/mfarm/mfarm-agent.py",
+            timeout=10,
+        )
+    except Exception as e:
+        raise click.ClickException(f"SSH probe failed: {e}")
+    if rc != 0 or "VERSION = " not in out:
+        raise click.ClickException(
+            "Could not read agent version from rig — is /opt/mfarm/mfarm-agent.py present?"
+        )
+    version = out.split('"')[1] if '"' in out else "?"
+    console.print(f"  rig agent version: [cyan]{version}[/cyan]")
+    if not version.startswith(("0.2.", "0.3.", "0.4.", "0.5.")):
+        # Soft floor at 0.2.x; bump this list when major-versioning the
+        # transport. Anything lower lacks the push_client wiring.
+        raise click.ClickException(
+            f"Rig is running agent {version}; need 0.2.0+ for push transport. "
+            "Bump the project VERSION and wait ~5 min for the auto-updater."
+        )
+
+    # 2. Generate token, persist server-side first. If the rig restart
+    # later fails, the DB still has the live token — operator can retry.
+    token = _secrets.token_urlsafe(32)
+    Rig.set_agent_token(db, rig.id, token)
+    console.print(f"  issued token: [dim]{token[:8]}…[/dim] (32 bytes)")
+
+    # 3. Read the rig's current config, inject agent_token, write back.
+    # Atomic via /etc/mfarm/config.json.tmp + mv, so a partial write
+    # can't leave the agent reading invalid JSON on its next reload.
+    try:
+        out, _, rc = pool.exec(rig, "cat /etc/mfarm/config.json", timeout=10)
+    except Exception as e:
+        raise click.ClickException(f"Failed to read rig config: {e}")
+    if rc != 0:
+        # File missing is non-fatal — start from empty.
+        config = {}
+    else:
+        try:
+            config = _json.loads(out) if out.strip() else {}
+        except Exception as e:
+            raise click.ClickException(f"Rig config is not valid JSON: {e}")
+    config["agent_token"] = token
+    new_content = _json.dumps(config, indent=2)
+    try:
+        pool.upload_string(rig, new_content, "/etc/mfarm/config.json.tmp")
+        pool.exec(
+            rig,
+            "mv /etc/mfarm/config.json.tmp /etc/mfarm/config.json",
+            timeout=5,
+        )
+    except Exception as e:
+        raise click.ClickException(f"Failed to deploy config: {e}")
+    console.print("  config deployed")
+
+    # 4. Restart the agent so it picks up the new token. Don't use SIGHUP
+    # — the agent reloads config only on `apply_config` command, and that
+    # path doesn't re-init push_client. Service restart is the simplest
+    # reliable trigger.
+    try:
+        pool.exec(rig, "systemctl restart mfarm-agent", timeout=15)
+    except Exception as e:
+        raise click.ClickException(f"Failed to restart mfarm-agent: {e}")
+    console.print("  mfarm-agent restarted")
+
+    # 5. Verify by tailing the agent's journal. The agent logs "Push
+    # transport enabled" exactly once on startup when the token loaded
+    # successfully. Wait a few seconds for systemd to bring it up.
+    _time.sleep(4)
+    try:
+        out, _, _ = pool.exec(
+            rig,
+            "journalctl -u mfarm-agent -n 50 --no-pager",
+            timeout=10,
+        )
+    except Exception as e:
+        console.print(f"  [yellow]could not read journal: {e}[/yellow]")
+        return
+    if "Push transport enabled" in out:
+        console.print(f"[green]  pilot OK — {rig.name} is now on the push transport[/green]")
+    else:
+        console.print(
+            "[yellow]  agent did not log 'Push transport enabled' — "
+            "check `journalctl -u mfarm-agent` on the rig manually[/yellow]"
+        )
+
+
 @rig_group.command("shutdown")
 @click.argument("target")
 @click.option("--force", is_flag=True, help="Skip confirmation")

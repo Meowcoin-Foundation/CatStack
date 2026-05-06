@@ -146,6 +146,19 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     if "mac" not in existing_cols:
         conn.execute("ALTER TABLE rigs ADD COLUMN mac TEXT")
         conn.commit()
+    if "agent_token" not in existing_cols:
+        conn.execute("ALTER TABLE rigs ADD COLUMN agent_token TEXT")
+        # Partial unique index: lets us enforce uniqueness on issued tokens
+        # while keeping multiple un-tokenized rigs valid (NULL).
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rigs_agent_token "
+            "ON rigs(agent_token) WHERE agent_token IS NOT NULL"
+        )
+        conn.commit()
+    snap_cols = {r[1] for r in conn.execute("PRAGMA table_info(rig_snapshots)").fetchall()}
+    if "algo" not in snap_cols:
+        conn.execute("ALTER TABLE rig_snapshots ADD COLUMN algo TEXT")
+        conn.commit()
     # Track schema version
     existing = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     if existing is None or existing < SCHEMA_VERSION:
