@@ -369,6 +369,38 @@ _DMI_CACHE: dict | None = None
 _FAN_READ_CACHE: tuple[float, list[dict]] = (0.0, [])
 _FAN_READ_TTL = 5.0
 
+# Manual PWM overrides that survive the firmware's onboard auto-fan curve.
+# The X12ULTRA AVR (FW 3.0) has a watchdog (~120s short / ~732s long); when
+# it fires, the firmware reverts to its temperature-driven curve and a
+# single -f write gets clobbered within minutes. HiveOS's octofan daemon
+# refreshes every 10s. We piggyback on the stats cycle and re-issue every
+# 30s — well inside the watchdog window. {fan_index: pwm_byte}.
+_FAN_OVERRIDES: dict[int, int] = {}
+_LAST_FAN_REFRESH: float = 0.0
+# 10s matches HiveOS's octofan daemon. Empirically, -d defPWM holds for
+# ~30s and -f curPWM for ~10s before the firmware's onboard temperature
+# ramp overrides; refreshing both every 10s keeps the user's value pinned.
+_FAN_REFRESH_INTERVAL = 10.0
+_FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
+
+
+def _fan_ctrl_write(idx: int, pwm: int) -> int:
+    """Issue both -d (startup/default PWM) and -f (current PWM) so the
+    firmware's auto-curve has the lowest ceiling possible. Returns rc of
+    the -f call (the one that takes effect immediately)."""
+    try:
+        subprocess.run(
+            [str(FAN_CTRL_BIN), "-d", str(idx), "-v", str(pwm)],
+            capture_output=True, text=True, timeout=5,
+        )
+        r = subprocess.run(
+            [str(FAN_CTRL_BIN), "-f", str(idx), "-v", str(pwm)],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+
 
 def _read_dmi() -> dict:
     global _DMI_CACHE
@@ -477,11 +509,54 @@ def get_chassis_info() -> dict:
     return info
 
 
+def _save_fan_overrides() -> None:
+    """Persist _FAN_OVERRIDES so a manual setting survives an agent restart."""
+    try:
+        _FAN_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FAN_OVERRIDES_PATH.write_text(json.dumps(_FAN_OVERRIDES))
+    except OSError:
+        pass
+
+
+def _load_fan_overrides() -> None:
+    """Restore manual overrides from disk on agent startup."""
+    global _FAN_OVERRIDES
+    try:
+        data = json.loads(_FAN_OVERRIDES_PATH.read_text())
+        _FAN_OVERRIDES = {int(k): int(v) for k, v in data.items()}
+    except (OSError, ValueError):
+        _FAN_OVERRIDES = {}
+
+
+def _refresh_fan_overrides() -> None:
+    """Re-issue any tracked manual PWM overrides.
+
+    The X12ULTRA AVR's onboard temperature-driven curve clobbers a manual
+    -f write within ~10s (or ~30s if defPWM was also set). We refresh both
+    -d and -f every _FAN_REFRESH_INTERVAL seconds from the stats cycle to
+    keep the user's value pinned. No-op when no overrides are set or the
+    binary is unavailable; failures are silent — the next refresh retries.
+    """
+    global _LAST_FAN_REFRESH
+    if not _FAN_OVERRIDES:
+        return
+    if not FAN_CTRL_BIN.exists():
+        return
+    now = time.time()
+    if now - _LAST_FAN_REFRESH < _FAN_REFRESH_INTERVAL:
+        return
+    _LAST_FAN_REFRESH = now
+    for idx, pwm in list(_FAN_OVERRIDES.items()):
+        _fan_ctrl_write(idx, pwm)
+
+
 def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
     """Set chassis fan PWM. pct is 0-100. Returns (rc, stdout, stderr).
 
-    Linear pct→PWM mapping (no per-fan calibration loop like HiveOS's
-    octofan service does — this is a one-shot manual override).
+    Linear pct→PWM. Records the override so _refresh_fan_overrides can
+    keep re-issuing it before the X12ULTRA AVR's onboard auto-fan curve
+    overrides. Issues both -d (startup PWM, holds ~30s) and -f (current
+    PWM, takes effect immediately) — see _fan_ctrl_write.
     """
     if not FAN_CTRL_BIN.exists():
         return (1, "", f"{FAN_CTRL_BIN} not present")
@@ -491,20 +566,18 @@ def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
     except (TypeError, ValueError) as e:
         return (1, "", f"bad args: {e}")
     pwm = max(0, min(255, round(255 * pct_clamped / 100)))
-    try:
-        r = subprocess.run(
-            [str(FAN_CTRL_BIN), "-f", str(idx), "-v", str(pwm)],
-            capture_output=True, text=True, timeout=5,
-        )
-        # Force the next stats cycle to re-read so the dashboard reflects
-        # the change without waiting for the 5s read cache to expire.
-        global _FAN_READ_CACHE
-        _FAN_READ_CACHE = (0.0, [])
-        return (r.returncode, r.stdout, r.stderr)
-    except subprocess.TimeoutExpired as e:
-        return (124, "", f"timeout: {e}")
-    except OSError as e:
-        return (1, "", f"{type(e).__name__}: {e}")
+    rc = _fan_ctrl_write(idx, pwm)
+    if rc == 0:
+        _FAN_OVERRIDES[idx] = pwm
+        _save_fan_overrides()
+        global _LAST_FAN_REFRESH
+        _LAST_FAN_REFRESH = time.time()
+    # Force the next stats cycle to re-read so the dashboard reflects
+    # the change without waiting for the 5s read cache to expire.
+    global _FAN_READ_CACHE
+    _FAN_READ_CACHE = (0.0, [])
+    msg = "Success" if rc == 0 else f"fan_controller_cli rc={rc}"
+    return (rc, msg, "")
 
 
 # ── Miner API Parsers ──────────────────────────────────────────────────
@@ -1638,6 +1711,7 @@ class Agent:
     def run(self):
         log.info("CatStack Agent v%s starting on %s", VERSION, socket.gethostname())
         self.config.load()
+        _load_fan_overrides()
 
         # Enable the push transport iff a token has been provisioned. No
         # token → push_client stays None → _stats_loop skips push, _poll_loop
@@ -1706,6 +1780,12 @@ class Agent:
                     self.push_client.push_stats(stats)
                 except Exception as e:
                     log.debug("Stats push skipped: %s", e)
+            # Re-issue manual fan PWMs every 30s so the X12ULTRA AVR's
+            # onboard auto-fan curve doesn't clobber the user's setting.
+            try:
+                _refresh_fan_overrides()
+            except Exception as e:
+                log.debug("Fan refresh skipped: %s", e)
             time.sleep(self.config.stats_interval)
 
     def _watchdog_loop(self):
