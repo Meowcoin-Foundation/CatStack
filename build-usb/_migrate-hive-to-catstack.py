@@ -1,5 +1,9 @@
 """Migrate a HiveOS rig to CatStack/MeowOS, applying a chosen flight sheet.
 
+See `MIGRATING-FROM-HIVEOS.md` for the full procedure including the per-rig
+Hive-Shell prep step (sshd loopback fix + `user` password reset) that this
+script can't do from outside.
+
 Usage:
     python _migrate-hive-to-catstack.py <rig_name> <rig_ip> [<flight_sheet>]
 
