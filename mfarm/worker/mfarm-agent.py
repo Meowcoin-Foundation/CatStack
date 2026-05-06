@@ -377,17 +377,20 @@ _FAN_READ_TTL = 5.0
 # 30s — well inside the watchdog window. {fan_index: pwm_byte}.
 _FAN_OVERRIDES: dict[int, int] = {}
 _LAST_FAN_REFRESH: float = 0.0
-# 10s matches HiveOS's octofan daemon. Empirically, -d defPWM holds for
-# ~30s and -f curPWM for ~10s before the firmware's onboard temperature
-# ramp overrides; refreshing both every 10s keeps the user's value pinned.
-_FAN_REFRESH_INTERVAL = 10.0
+# Empirically the X12ULTRA firmware can override curPWM with as little as
+# a 7s gap after our last write — a 10s refresh leaves a window where
+# operators hear the fan ramp up briefly before the next refresh pulls it
+# back down (audible oscillation on a ~10s cycle). 3s is tight enough to
+# stay ahead of every override observed and costs only ~13% AVR bus busy
+# on a 4-fan rig (~100ms per -f call, 4 fans / 3000ms).
+_FAN_REFRESH_INTERVAL = 3.0
 _FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
 
 
-def _fan_ctrl_write(idx: int, pwm: int) -> int:
-    """Issue both -d (startup/default PWM) and -f (current PWM) so the
-    firmware's auto-curve has the lowest ceiling possible. Returns rc of
-    the -f call (the one that takes effect immediately)."""
+def _fan_ctrl_set(idx: int, pwm: int) -> int:
+    """Initial set — issues -d (defPWM, persists across reset) AND -f
+    (current PWM). _fan_ctrl_refresh re-issues only -f so the per-cycle
+    AVR call cost stays small. Returns rc of -f."""
     try:
         subprocess.run(
             [str(FAN_CTRL_BIN), "-d", str(idx), "-v", str(pwm)],
@@ -400,6 +403,18 @@ def _fan_ctrl_write(idx: int, pwm: int) -> int:
         return r.returncode
     except (OSError, subprocess.TimeoutExpired):
         return 1
+
+
+def _fan_ctrl_refresh_one(idx: int, pwm: int) -> None:
+    """Re-pin curPWM only. defPWM was already set by _fan_ctrl_set so we
+    skip the second AVR transaction here."""
+    try:
+        subprocess.run(
+            [str(FAN_CTRL_BIN), "-f", str(idx), "-v", str(pwm)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _read_dmi() -> dict:
@@ -528,14 +543,45 @@ def _load_fan_overrides() -> None:
         _FAN_OVERRIDES = {}
 
 
+# Piecewise curve mapping the user's desired RPM% (input) to the PWM byte
+# the AVR needs. Empirically measured on Octominer X12ULTRA chassis fans
+# with a fine probe at PWM=60/65/70/75/80/85/90 added to the coarser
+# 32/64/96/128/160/192/220/255 sweep — the dense low-PWM data isolates
+# the steep stall-recovery shoulder around PWM=70 that piecewise-linear
+# would otherwise cross with the wrong slope. Result: setting "50" lands
+# the fan at 51% of max RPM (was 73% with naive pct=PWM%).
+_FAN_RPM_TO_PWM_CURVE = (
+    (0, 0),
+    (20, 30),
+    (50, 75),
+    (60, 90),
+    (80, 130),
+    (90, 165),
+    (98, 195),
+    (100, 220),
+)
+
+
+def _rpm_pct_to_pwm(pct: int) -> int:
+    """Map desired RPM-as-%-of-max to a PWM byte using piecewise linear
+    interpolation over the measured fan curve. Bounded 0-255."""
+    if pct <= 0:
+        return 0
+    if pct >= 100:
+        return _FAN_RPM_TO_PWM_CURVE[-1][1]
+    for (p1, w1), (p2, w2) in zip(_FAN_RPM_TO_PWM_CURVE, _FAN_RPM_TO_PWM_CURVE[1:]):
+        if pct <= p2:
+            return round(w1 + (pct - p1) * (w2 - w1) / (p2 - p1))
+    return _FAN_RPM_TO_PWM_CURVE[-1][1]
+
+
 def _refresh_fan_overrides() -> None:
-    """Re-issue any tracked manual PWM overrides.
+    """Re-issue any tracked manual PWM overrides via -f only.
 
     The X12ULTRA AVR's onboard temperature-driven curve clobbers a manual
-    -f write within ~10s (or ~30s if defPWM was also set). We refresh both
-    -d and -f every _FAN_REFRESH_INTERVAL seconds from the stats cycle to
-    keep the user's value pinned. No-op when no overrides are set or the
-    binary is unavailable; failures are silent — the next refresh retries.
+    write within ~10s. _FAN_REFRESH_INTERVAL is tighter than that window
+    so the operator's value stays pinned. defPWM was already set by
+    _fan_ctrl_set on the initial set, so refresh skips -d.
     """
     global _LAST_FAN_REFRESH
     if not _FAN_OVERRIDES:
@@ -547,16 +593,20 @@ def _refresh_fan_overrides() -> None:
         return
     _LAST_FAN_REFRESH = now
     for idx, pwm in list(_FAN_OVERRIDES.items()):
-        _fan_ctrl_write(idx, pwm)
+        _fan_ctrl_refresh_one(idx, pwm)
 
 
 def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
-    """Set chassis fan PWM. pct is 0-100. Returns (rc, stdout, stderr).
+    """Set chassis fan to ~pct% of max RPM. Returns (rc, stdout, stderr).
 
-    Linear pct→PWM. Records the override so _refresh_fan_overrides can
-    keep re-issuing it before the X12ULTRA AVR's onboard auto-fan curve
-    overrides. Issues both -d (startup PWM, holds ~30s) and -f (current
-    PWM, takes effect immediately) — see _fan_ctrl_write.
+    `pct` is the operator's desired fan speed as % of max RPM, NOT raw
+    PWM duty. Mapping uses _rpm_pct_to_pwm — fans don't scale linearly
+    with PWM, so PWM=50% gives ~78% RPM on these chassis. Without this
+    translation, "Set 50%" would visibly read back as 78%.
+
+    Records the override so _refresh_fan_overrides keeps re-issuing it
+    every _FAN_REFRESH_INTERVAL seconds before the firmware's auto-curve
+    can override.
     """
     if not FAN_CTRL_BIN.exists():
         return (1, "", f"{FAN_CTRL_BIN} not present")
@@ -565,8 +615,8 @@ def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
         pct_clamped = max(0, min(100, int(pct)))
     except (TypeError, ValueError) as e:
         return (1, "", f"bad args: {e}")
-    pwm = max(0, min(255, round(255 * pct_clamped / 100)))
-    rc = _fan_ctrl_write(idx, pwm)
+    pwm = _rpm_pct_to_pwm(pct_clamped)
+    rc = _fan_ctrl_set(idx, pwm)
     if rc == 0:
         _FAN_OVERRIDES[idx] = pwm
         _save_fan_overrides()
@@ -576,7 +626,7 @@ def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
     # the change without waiting for the 5s read cache to expire.
     global _FAN_READ_CACHE
     _FAN_READ_CACHE = (0.0, [])
-    msg = "Success" if rc == 0 else f"fan_controller_cli rc={rc}"
+    msg = f"Success (pct={pct_clamped}, pwm={pwm})" if rc == 0 else f"fan_controller_cli rc={rc}"
     return (rc, msg, "")
 
 
