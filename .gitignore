@@ -6,3 +6,4 @@ build/
 *.iso
 *.img
 .claude/
+console.log

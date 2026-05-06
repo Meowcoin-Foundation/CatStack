@@ -1,0 +1,19 @@
+[Unit]
+Description=Allocate 1GB hugepages for XMRig RandomX
+DefaultDependencies=no
+After=local-fs.target
+Before=mfarm-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Free 2MB pages first; xmrig will re-allocate them after
+ExecStart=/bin/sh -c 'echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages || true'
+ExecStart=/bin/sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+ExecStart=/bin/sh -c 'echo 1 > /proc/sys/vm/compact_memory || true'
+# Allocate 3 x 1GB pages for the RandomX dataset (2080 MB) + cache (256 MB)
+ExecStart=/bin/sh -c 'echo 3 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages'
+ExecStart=/bin/sh -c 'cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages | grep -q 3 && echo OK || (echo FAILED-1GB-allocation; exit 1)'
+
+[Install]
+WantedBy=multi-user.target

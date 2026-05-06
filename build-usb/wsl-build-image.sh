@@ -321,11 +321,8 @@ cp "$SRC/VERSION" "$MNT/opt/mfarm/VERSION"
 cp "$SRC/build-usb/mfarm-files/config.json" "$MNT/etc/mfarm/config.json"
 chroot "$MNT" chown -R miner:miner /etc/mfarm /opt/mfarm /var/log/mfarm /var/run/mfarm
 
-# 'miner' command shows live miner output
-cat > "$MNT/usr/local/bin/miner" <<'MINERCMD'
-#!/bin/bash
-tail -n 50 -f /var/log/mfarm/miner.log
-MINERCMD
+# 'miner' command — live xmrig HTTP-API summary header + tailed log
+cp "$SRC/build-usb/mfarm-files/miner-cmd.sh" "$MNT/usr/local/bin/miner"
 chmod +x "$MNT/usr/local/bin/miner"
 
 # Download all miners into image
