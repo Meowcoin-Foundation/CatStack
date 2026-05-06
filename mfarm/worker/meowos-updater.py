@@ -118,8 +118,10 @@ def safe_extract(tar_bytes: bytes, dest: str) -> list[str]:
 
 def install_files(staging_dir: str, files: list[str]) -> None:
     """Move staged files into '/'. Per-file atomic via os.replace; falls back
-    to shutil.move across filesystems. Modes set by suffix: 0o755 for scripts,
-    0o644 for everything else."""
+    to shutil.move across filesystems. Modes set by suffix: 0o755 for scripts
+    and ELF binaries, 0o644 for everything else (binary detection is by ELF
+    magic so files like fan_controller_cli that have no extension still get
+    +x, while data blobs alongside them stay 0o644)."""
     for rel in files:
         src = Path(staging_dir) / rel
         dst = Path("/") / rel
@@ -128,7 +130,16 @@ def install_files(staging_dir: str, files: list[str]) -> None:
             os.replace(src, dst)
         except OSError:
             shutil.move(str(src), str(dst))
-        mode = 0o755 if rel.endswith((".py", ".sh")) else 0o644
+        mode = 0o644
+        if rel.endswith((".py", ".sh")):
+            mode = 0o755
+        else:
+            try:
+                with open(dst, "rb") as f:
+                    if f.read(4) == b"\x7fELF":
+                        mode = 0o755
+            except OSError:
+                pass
         try:
             os.chmod(dst, mode)
         except OSError:

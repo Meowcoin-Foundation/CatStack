@@ -480,6 +480,52 @@ async def stop_miner(name: str):
         raise HTTPException(500, str(e))
 
 
+@router.post("/rigs/{name}/external-fan")
+async def set_external_fan(name: str, body: dict):
+    """Set an Octominer chassis fan PWM via the AVR USB MCU.
+
+    body = {"index": int, "pct": 0..100}. Setting persists until the rig
+    reboots or the agent's next manual override. Push path goes through
+    the long-poll queue and waits ~10s for the agent to confirm. SSH
+    fallback runs fan_controller_cli directly when the agent's offline.
+    """
+    db = get_db()
+    rig = Rig.get_by_name(db, name)
+    if not rig:
+        raise HTTPException(404)
+    try:
+        index = int(body.get("index"))
+        pct = int(body.get("pct"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "index and pct must be integers")
+    if not 0 <= pct <= 100:
+        raise HTTPException(400, "pct must be 0..100")
+
+    if agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
+        result = await agent_state.enqueue_and_wait(
+            rig.id, "set_external_fan", {"index": index, "pct": pct}, timeout=10,
+        )
+        if result is not None:
+            return {
+                "ok": result.get("rc", -1) == 0,
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "via": "agent",
+            }
+
+    pool = get_pool()
+    loop = asyncio.get_event_loop()
+    pwm = max(0, min(255, round(255 * pct / 100)))
+    cmd = f"/opt/mfarm/fan_controller_cli -f {index} -v {pwm}"
+    try:
+        stdout, stderr, rc = await loop.run_in_executor(
+            _executor, lambda: pool.exec(rig, cmd, timeout=10)
+        )
+        return {"ok": rc == 0, "stdout": stdout, "stderr": stderr, "via": "ssh"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # Default fallback credential for freshly-flashed MeowOS rigs. The miner user
 # has NOPASSWD sudo, so this gives root SSH access too. If an operator hardens
 # their image they should override this via the MEOWOS_DEFAULT_USER /
@@ -2041,6 +2087,7 @@ _AGENT_BUNDLE_FILES = {
     "opt/mfarm/meowos-webui.py":           _WORKER_DIR / "meowos-webui.py",
     "opt/mfarm/meowos-webui.html":         _WORKER_DIR / "meowos-webui.html",
     "opt/mfarm/meowos-updater.py":         _WORKER_DIR / "meowos-updater.py",
+    "opt/mfarm/fan_controller_cli":        _WORKER_DIR / "fan_controller_cli",
     "etc/systemd/system/mfarm-agent.service":         _WORKER_DIR / "mfarm-agent.service",
     "etc/systemd/system/meowos-phonehome.service":    _WORKER_DIR / "meowos-phonehome.service",
     "etc/systemd/system/meowos-webui.service":        _WORKER_DIR / "meowos-webui.service",

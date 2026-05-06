@@ -295,6 +295,12 @@ cp "$SRC/mfarm/worker/miner-wrapper.sh" "$MNT/opt/mfarm/miner-wrapper.sh"
 cp "$SRC/mfarm/worker/mfarm-agent.service" "$MNT/etc/systemd/system/mfarm-agent.service"
 chmod +x "$MNT/opt/mfarm/mfarm-agent.py" "$MNT/opt/mfarm/miner-wrapper.sh"
 
+# Octominer chassis fan controller (statically-linked HID/AVR client).
+# No-op on every other chassis — the agent only invokes it when DMI says
+# this is an Octominer.
+cp "$SRC/mfarm/worker/fan_controller_cli" "$MNT/opt/mfarm/fan_controller_cli"
+chmod +x "$MNT/opt/mfarm/fan_controller_cli"
+
 cp "$SRC/mfarm/worker/xmrig-1gb-hugepages.service" "$MNT/etc/systemd/system/xmrig-1gb-hugepages.service"
 mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/xmrig-1gb-hugepages.service \

@@ -51,6 +51,10 @@ PID_PATH = Path("/var/run/mfarm/miner.pid")
 # console URLs without restarting the agent.
 CONSOLE_URL_PATH = Path("/var/run/mfarm/console_url")
 
+# Octominer chassis fan controller (USB AVR MCU at 16c0:05dc, exposed via
+# fan_controller_cli — same binary HiveOS ships in /hive/opt/octofan/).
+FAN_CTRL_BIN = Path("/opt/mfarm/fan_controller_cli")
+
 # Ensure dirs exist
 for d in [STATS_PATH.parent, Path("/var/log/mfarm"), Path("/etc/mfarm")]:
     d.mkdir(parents=True, exist_ok=True)
@@ -349,7 +353,158 @@ def get_system_stats() -> dict:
     except OSError:
         pass
 
+    chassis = get_chassis_info()
+    if chassis:
+        info["chassis"] = chassis
+
     return info
+
+
+# ── Octominer chassis fan controller ────────────────────────────────────
+
+# DMI is a fixed property of the board, so read it once and cache.
+_DMI_CACHE: dict | None = None
+# fan_controller_cli -r is a USB-AVR HID transaction (~100ms). Cache its
+# parsed output so a 2s stats cycle doesn't hammer the MCU.
+_FAN_READ_CACHE: tuple[float, list[dict]] = (0.0, [])
+_FAN_READ_TTL = 5.0
+
+
+def _read_dmi() -> dict:
+    global _DMI_CACHE
+    if _DMI_CACHE is not None:
+        return _DMI_CACHE
+    out = {}
+    for key, path in (("vendor", "/sys/class/dmi/id/sys_vendor"),
+                      ("product", "/sys/class/dmi/id/product_name")):
+        try:
+            out[key] = Path(path).read_text().strip()
+        except OSError:
+            out[key] = ""
+    _DMI_CACHE = out
+    return out
+
+
+def _read_external_fans() -> list[dict]:
+    """Query the AVR fan controller and parse fan slots.
+
+    Returns [] when the binary or the controller is unavailable. Each
+    populated slot becomes {"index": int, "rpm": int, "pwm_pct": int}.
+    Slots reporting max RPM 0 (no fan plugged in) are dropped so the UI
+    only shows live channels.
+    """
+    global _FAN_READ_CACHE
+    now = time.time()
+    if now - _FAN_READ_CACHE[0] < _FAN_READ_TTL:
+        return _FAN_READ_CACHE[1]
+    if not FAN_CTRL_BIN.exists():
+        _FAN_READ_CACHE = (now, [])
+        return []
+    try:
+        r = subprocess.run(
+            [str(FAN_CTRL_BIN), "-r"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _FAN_READ_CACHE = (now, [])
+        return []
+    if r.returncode != 0 or "Serial No:" not in r.stdout:
+        _FAN_READ_CACHE = (now, [])
+        return []
+
+    import re
+    max_re = re.compile(r"FAN No\.\s*(\d+)\s*max RPM:\s*([\d.-]+)")
+    rpm_re = re.compile(r"FAN No\.\s*(\d+)\s*RPM:\s*([\d.-]+)")
+    pct_re = re.compile(r"FAN No\.\s*(\d+)\s*RPM in percent:\s*(\d+)")
+
+    by_idx: dict[int, dict] = {}
+    for line in r.stdout.splitlines():
+        m = max_re.search(line)
+        if m:
+            by_idx.setdefault(int(m.group(1)), {})["max_rpm"] = float(m.group(2))
+            continue
+        m = pct_re.search(line)
+        if m:
+            by_idx.setdefault(int(m.group(1)), {})["pwm_pct"] = int(m.group(2))
+            continue
+        m = rpm_re.search(line)
+        if m:
+            try:
+                by_idx.setdefault(int(m.group(1)), {})["rpm"] = int(float(m.group(2)))
+            except ValueError:
+                pass
+
+    fans = []
+    for idx in sorted(by_idx):
+        d = by_idx[idx]
+        if d.get("max_rpm", 0) <= 0:
+            continue
+        fans.append({
+            "index": idx,
+            "rpm": d.get("rpm", 0),
+            "pwm_pct": d.get("pwm_pct", 0),
+        })
+    _FAN_READ_CACHE = (now, fans)
+    return fans
+
+
+def get_chassis_info() -> dict:
+    """Identify the chassis and (for Octominers) read external fan state.
+
+    Returned shape matches what the dashboard reads as `system.chassis`:
+        {
+          "vendor": "Octominer",
+          "product": "X12ULTRA",
+          "is_octominer": true,
+          "external_fans": [{"index": 0, "rpm": 3300, "pwm_pct": 75}, …],
+        }
+    Empty dict on non-DMI systems so the UI's `if (chassis.is_octominer)`
+    gate naturally hides controls on every non-Octominer rig.
+    """
+    dmi = _read_dmi()
+    vendor = dmi.get("vendor", "")
+    product = dmi.get("product", "")
+    if not vendor and not product:
+        return {}
+    is_octominer = "octominer" in vendor.lower()
+    info = {
+        "vendor": vendor,
+        "product": product,
+        "is_octominer": is_octominer,
+    }
+    if is_octominer:
+        info["external_fans"] = _read_external_fans()
+    return info
+
+
+def set_external_fan(index: int, pct: int) -> tuple[int, str, str]:
+    """Set chassis fan PWM. pct is 0-100. Returns (rc, stdout, stderr).
+
+    Linear pct→PWM mapping (no per-fan calibration loop like HiveOS's
+    octofan service does — this is a one-shot manual override).
+    """
+    if not FAN_CTRL_BIN.exists():
+        return (1, "", f"{FAN_CTRL_BIN} not present")
+    try:
+        idx = int(index)
+        pct_clamped = max(0, min(100, int(pct)))
+    except (TypeError, ValueError) as e:
+        return (1, "", f"bad args: {e}")
+    pwm = max(0, min(255, round(255 * pct_clamped / 100)))
+    try:
+        r = subprocess.run(
+            [str(FAN_CTRL_BIN), "-f", str(idx), "-v", str(pwm)],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Force the next stats cycle to re-read so the dashboard reflects
+        # the change without waiting for the 5s read cache to expire.
+        global _FAN_READ_CACHE
+        _FAN_READ_CACHE = (0.0, [])
+        return (r.returncode, r.stdout, r.stderr)
+    except subprocess.TimeoutExpired as e:
+        return (124, "", f"timeout: {e}")
+    except OSError as e:
+        return (1, "", f"{type(e).__name__}: {e}")
 
 
 # ── Miner API Parsers ──────────────────────────────────────────────────
@@ -1657,6 +1812,8 @@ class Agent:
                     capture_output=True, text=True, timeout=timeout,
                 )
                 return (r.returncode, r.stdout, r.stderr)
+            if cmd == "set_external_fan":
+                return set_external_fan(args.get("index"), args.get("pct"))
             return (1, "", f"unknown command: {cmd!r}")
         except subprocess.TimeoutExpired as e:
             return (124, "", f"timeout: {e}")

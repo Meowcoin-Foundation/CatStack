@@ -10,3 +10,4 @@ mfarm/worker/** text eol=lf
 *.tar.xz binary
 *.img binary
 *.img.xz binary
+mfarm/worker/fan_controller_cli binary
