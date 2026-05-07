@@ -381,12 +381,13 @@ _LAST_FAN_REFRESH: float = 0.0
 # to its watchdog — confirmed by stopping the agent and disabling the
 # watchdog: PWM still spiked to 146/154 with RPM hitting 3600+ within
 # seconds. There's no command in the firmware's USB API to disable it.
-# So we race it: refresh every 1s so the firmware can't sustain a high
-# PWM long enough for the fans to physically rev up audibly. Fans take
-# ~1-2s to ramp from 2300 to 3600 RPM; resetting curPWM at 1s catches
-# the spike before it becomes audible. Cost on a 4-fan rig: 4 × 100ms
-# AVR HID writes per second = 40% AVR-bus busy. Acceptable.
-_FAN_REFRESH_INTERVAL = 1.0
+# So we race it: at 0.5s the firmware override window is too short for
+# fans to physically respond audibly (Octominer fans need ~1-2s to ramp
+# from 2300 to 3600 RPM). Cost on a 4-fan rig: 4 × ~100ms HID writes per
+# 500ms cycle = ~80% AVR-bus busy. The AVR handles it; we tested 1s
+# first (4 audible jumps / 180s, peaks at 2795 RPM) and the operator
+# could still hear them, so we tightened further.
+_FAN_REFRESH_INTERVAL = 0.5
 _FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
 
 
