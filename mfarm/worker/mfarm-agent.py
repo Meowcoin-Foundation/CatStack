@@ -387,10 +387,38 @@ _FAN_REFRESH_INTERVAL = 3.0
 _FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
 
 
+def _disable_fan_watchdog() -> None:
+    """Turn off the X12ULTRA AVR's USB watchdog.
+
+    By default the firmware fires the watchdog every ~120s and reverts
+    every fan to defPWM (255 = 100%) until the host writes again — which
+    on rigs with a manual override produces an audible ~4-minute rev-up
+    cycle even though our 3s refresh recovers within seconds. Disabling
+    the watchdog (`-w 0 -v 0` puts the AVR in mode 0) eliminates the
+    rev-ups entirely. Trade-off: if mfarm-agent dies and stays dead, the
+    AVR will hold the last manual PWM forever instead of failing safe to
+    full-blast — acceptable since the GPU drivers will throttle on temp.
+
+    Idempotent and cheap (~100ms HID round-trip). Safe to call repeatedly.
+    """
+    if not FAN_CTRL_BIN.exists():
+        return
+    try:
+        subprocess.run(
+            [str(FAN_CTRL_BIN), "-w", "0", "-v", "0"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _fan_ctrl_set(idx: int, pwm: int) -> int:
     """Initial set — issues -d (defPWM, persists across reset) AND -f
     (current PWM). _fan_ctrl_refresh re-issues only -f so the per-cycle
-    AVR call cost stays small. Returns rc of -f."""
+    AVR call cost stays small. Also disables the AVR watchdog so the
+    firmware doesn't periodically revert defPWM and rev the fans up.
+    Returns rc of -f."""
+    _disable_fan_watchdog()
     try:
         subprocess.run(
             [str(FAN_CTRL_BIN), "-d", str(idx), "-v", str(pwm)],
@@ -1762,6 +1790,12 @@ class Agent:
         log.info("CatStack Agent v%s starting on %s", VERSION, socket.gethostname())
         self.config.load()
         _load_fan_overrides()
+        # The AVR's watchdog firing is what causes the audible periodic
+        # fan rev-ups operators hear. Disable it on startup if any manual
+        # overrides are active, so the firmware doesn't revert defPWM
+        # behind our back.
+        if _FAN_OVERRIDES:
+            _disable_fan_watchdog()
 
         # Enable the push transport iff a token has been provisioned. No
         # token → push_client stays None → _stats_loop skips push, _poll_loop
