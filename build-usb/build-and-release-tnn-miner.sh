@@ -58,10 +58,26 @@ mkdir -p "$LOCAL_STAGE/tnn-miner-orochi/lib"
 scp "$RIG_HOST:$BUILD_DIR/tnn-miner/build/tnn-miner" "$LOCAL_STAGE/tnn-miner-orochi/tnn-miner"
 chmod +x "$LOCAL_STAGE/tnn-miner-orochi/tnn-miner"
 
-# Bundle libnvrtc + builtins from rig-06's CUDA install (Orochi dlopens these
-# at runtime; production rigs only have libcudart12, not nvrtc).
-ssh "$RIG_HOST" 'cd /usr/local/cuda/targets/x86_64-linux/lib && tar czf - libnvrtc.so* libnvrtc-builtins.so*' \
+# Bundle libnvrtc + libnvrtc-builtins + libcudart from rig-06's CUDA install.
+# Orochi dlopen()s all three at runtime via cuew; production rigs may have
+# libcudart.so.12 versioned but cuew tries the unversioned `libcudart.so`
+# (same for libnvrtc), so we bundle resolved real files + symlink chains.
+# Without libcudart in the bundle, Octo_Top / HiveOcto01 segfault in
+# oroDeviceGetPCIBusId because cuDeviceGetPCIBusId_oro is NULL.
+ssh "$RIG_HOST" 'cd /usr/local/cuda/targets/x86_64-linux/lib && \
+    tar czhf - libnvrtc.so* libnvrtc-builtins.so* libcudart.so*' \
     | tar xzf - -C "$LOCAL_STAGE/tnn-miner-orochi/lib"
+# Reconstruct unversioned + major-version symlinks (tar -h dereferenced them).
+(
+  cd "$LOCAL_STAGE/tnn-miner-orochi/lib"
+  for stem in libcudart libnvrtc libnvrtc-builtins; do
+    full=$(ls "$stem".so.[0-9]*.[0-9]*.[0-9]* 2>/dev/null | head -1)
+    [ -z "$full" ] && continue
+    major=$(echo "$full" | sed -E "s/^($stem\.so\.[0-9]+).*/\1/")
+    [ -e "$major" ] || ln -sfn "$full" "$major"
+    [ -e "$stem.so" ] || ln -sfn "$major" "$stem.so"
+  done
+)
 ls -lh "$LOCAL_STAGE/tnn-miner-orochi/lib/"
 
 echo "=== Phase 3: tarball + release ==="
@@ -77,7 +93,10 @@ gh release create "$RELEASE_TAG" \
     --title "tnn-miner Orochi build $TAG (NVIDIA Linux)" \
     --notes "tnn-miner $TAG built with WITH_OROCHI=ON for Meowcoin-Foundation/CatStack rigs.
 
-Bundles libnvrtc/libnvrtc-builtins so MeowOS rigs (libcudart12 only) can run it without installing CUDA toolkit.
+Bundles libcudart, libnvrtc, libnvrtc-builtins so MeowOS rigs without the
+CUDA toolkit can run the binary. cuew dlopens unversioned names
+(libcudart.so / libnvrtc.so), so the bundle includes symlink chains
+through to the real .so files.
 
 Source: https://github.com/Tritonn204/tnn-miner/tree/$TAG" \
     "$LOCAL_STAGE.tar.gz#$TARBALL"
