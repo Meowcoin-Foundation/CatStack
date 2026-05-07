@@ -377,13 +377,16 @@ _FAN_READ_TTL = 5.0
 # 30s — well inside the watchdog window. {fan_index: pwm_byte}.
 _FAN_OVERRIDES: dict[int, int] = {}
 _LAST_FAN_REFRESH: float = 0.0
-# Empirically the X12ULTRA firmware can override curPWM with as little as
-# a 7s gap after our last write — a 10s refresh leaves a window where
-# operators hear the fan ramp up briefly before the next refresh pulls it
-# back down (audible oscillation on a ~10s cycle). 3s is tight enough to
-# stay ahead of every override observed and costs only ~13% AVR bus busy
-# on a 4-fan rig (~100ms per -f call, 4 fans / 3000ms).
-_FAN_REFRESH_INTERVAL = 3.0
+# The X12ULTRA firmware has a temperature-driven auto-curve in addition
+# to its watchdog — confirmed by stopping the agent and disabling the
+# watchdog: PWM still spiked to 146/154 with RPM hitting 3600+ within
+# seconds. There's no command in the firmware's USB API to disable it.
+# So we race it: refresh every 1s so the firmware can't sustain a high
+# PWM long enough for the fans to physically rev up audibly. Fans take
+# ~1-2s to ramp from 2300 to 3600 RPM; resetting curPWM at 1s catches
+# the spike before it becomes audible. Cost on a 4-fan rig: 4 × 100ms
+# AVR HID writes per second = 40% AVR-bus busy. Acceptable.
+_FAN_REFRESH_INTERVAL = 1.0
 _FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
 
 
