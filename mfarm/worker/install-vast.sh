@@ -45,6 +45,14 @@ die()  { echo "FATAL: $*" >&2; exit 1; }
 # ── 1/10  Pre-flight ───────────────────────────────────────────────────
 say "1/10  pre-flight checks"
 
+# Pause CPU mining BEFORE the network checks below. xmrig pinning all cores
+# (load avg 25+ on a 32-core mini PC) makes the 8s curl timeout fire on DNS
+# or TLS handshake even though the network itself is fine — pre-flight then
+# dies with "cannot reach console.vast.ai". Stop now; step 3 still does the
+# full mask/stop for everything else, step 10 still restores mfarm-agent.
+systemctl stop mfarm-agent 2>/dev/null || true
+pkill -9 xmrig 2>/dev/null || true
+
 # GPU must be on the PCIe bus — kaalia FATALs without one and burns the token.
 # Note: must NOT use `grep -q` here. With `set -o pipefail` (above), grep -q's
 # early exit on first match closes the pipe, lspci dies with SIGPIPE (exit 141),
@@ -92,13 +100,29 @@ done
 apt-get update -qq 2>&1 | tail -3 || warn "apt-get update produced warnings"
 
 # MeowOS images install cuda-cudart-12-8 via `dpkg -i --force-depends` (no
-# CUDA repo configured), which leaves apt's dependency tree permanently
-# broken — every subsequent `apt-get install` then fails with "Unmet
-# dependencies" because the cuda-cudart deps (cuda-toolkit-config-common
-# etc.) aren't installable. `-f install` resolves this by removing the
-# offending package; safe for Vast hosts (Vast workloads bring their own
-# CUDA in containers; the host only needs the nvidia driver).
-apt-get -f install -y 2>&1 | tail -3 || warn "apt-get -f install warnings (may be cosmetic)"
+# CUDA repo configured), which leaves apt's dependency tree partly broken —
+# subsequent `apt-get install` calls fail with "Unmet dependencies" because
+# the cuda-cudart deps (cuda-toolkit-config-common etc.) aren't installable.
+# Earlier versions of this script ran `apt-get -f install -y` here, which
+# resolved the unmet deps by REMOVING cuda-cudart-12-8. That's fine for a
+# pure Vast host (Vast bakes its own CUDA into containers), but our rigs
+# also run ccminer on the host — and ccminer needs libcudart.so.12. Losing
+# it bricked mining on mini09 last install.
+#
+# Safer approach: do a dry-run of -f install, refuse if it would remove
+# anything, fall back to `dpkg --configure -a` (which fixes only pending
+# configurations, doesn't touch the install set). Downstream apt-get install
+# steps will fail with specific errors if the dep tree is too broken to
+# proceed; that's better than silently nuking ccminer.
+plan=$(apt-get -f install -s 2>&1 || true)
+if echo "$plan" | grep -qE '^Remv '; then
+    say "apt-get -f install would REMOVE the following — refusing"
+    echo "$plan" | grep -E '^Remv ' | sed 's/^/    /'
+    say "running dpkg --configure -a instead (no removals)"
+    dpkg --configure -a 2>&1 | tail -3 || warn "dpkg --configure -a warnings"
+else
+    apt-get -f install -y 2>&1 | tail -3 || warn "apt-get -f install warnings (may be cosmetic)"
+fi
 
 # Tools the script uses. python3-pip is essential as a fallback path for
 # python3-requests when apt has unresolvable conflicts.
@@ -324,6 +348,26 @@ if grep -q 'Install failed' "$LOG"; then
     echo
     echo "INSTALL FAILED. Tail of log:"
     tail -20 "$LOG"
+
+    # First-pass triage: detect token-already-consumed (401 from identify) so
+    # the operator gets a clear, actionable message instead of having to crack
+    # open /root/vastai_install_logs.tar.gz to spot the buried HTTPError trace.
+    # Each Vast install token is single-use — calling
+    # /api/v0/daemon/identify/ a second time always returns 401. We surface
+    # this case explicitly because it's the #1 source of "vast won't install
+    # on rig X" tickets after the first rig succeeds with a portal-fresh token.
+    install_log=/root/vast_host_install.log
+    if grep -qE '401 (Client Error|Unauthorized).*identify' "$install_log" 2>/dev/null \
+       || grep -qE 'Unauthorized for url.*daemon/identify' "$install_log" 2>/dev/null; then
+        echo
+        echo "============================================================"
+        echo " Vast install token has already been consumed (HTTP 401)."
+        echo " Each token is single-use — get a fresh one from:"
+        echo "   https://cloud.vast.ai/host/setup/"
+        echo " then re-run with the new token."
+        echo "============================================================"
+        exit 4
+    fi
 
     # Recovery for the common 'NVML test failure' mode. Symptoms: the python
     # installer made it past identify (machine_id is set) and installed Docker,
