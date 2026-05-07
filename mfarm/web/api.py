@@ -1711,16 +1711,17 @@ async def _discover_algos_for_miner(miner) -> list[str] | None:
 
 
 async def _algos_for(miner) -> list[str]:
-    """Cached + live-discovered algos with hardcoded fallback."""
+    """Cached algos with hardcoded fallback.
+
+    Live discovery happens in `algo_refresh_loop` (background, hourly) — we
+    do NOT block the request on it. Otherwise a cold cache turns /api/miners
+    into a request that synchronously SSHes every rig × every miner and the
+    dropdown freezes for 5+ minutes after every console restart.
+    """
     now = _time.time()
     cached = _DISCOVERED_ALGOS.get(miner.name)
     if cached and cached[1] > now:
         return cached[0]
-    discovered = await _discover_algos_for_miner(miner)
-    if discovered:
-        _DISCOVERED_ALGOS[miner.name] = (discovered, now + _DISCOVERY_TTL_SEC)
-        return discovered
-    # Fallback: hardcoded list (last resort if no rig is online with the binary).
     return miner.supported_algos
 
 
@@ -1737,12 +1738,21 @@ async def get_miners():
 
 @router.post("/miners/refresh")
 async def refresh_miner_algos():
-    """Force re-discovery of algorithm lists for all miners."""
+    """Force re-discovery of algorithm lists for all miners.
+
+    Unlike /api/miners (which is read-only and uses cache-or-fallback),
+    this endpoint synchronously runs the live SSH discovery so the user
+    can wait through it after pressing the dashboard's refresh button.
+    """
     _DISCOVERED_ALGOS.clear()
+    now = _time.time()
     out = []
     for m in list_miners():
-        algos = await _algos_for(m)
-        out.append({"name": m.name, "discovered": len(algos),
+        discovered = await _discover_algos_for_miner(m)
+        if discovered:
+            _DISCOVERED_ALGOS[m.name] = (discovered, now + _DISCOVERY_TTL_SEC)
+        out.append({"name": m.name,
+                    "discovered": len(discovered) if discovered else 0,
                     "from_binary": m.name in _DISCOVERED_ALGOS})
     return out
 

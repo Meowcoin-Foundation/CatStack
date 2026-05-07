@@ -381,9 +381,9 @@ _register(MinerDefinition(
     api_type="tnn_http",
     default_api_port=8989,
     supports_solo=False,
-    # `--help` writes the option block to stdout; coin-symbol list is in
-    # README rather than --help, so we rely on the supported_algos fallback.
-    algo_query_argv=["--help"],
+    # No live algo discovery: tnn-miner's coin symbols come from the README,
+    # not --help. `algo_query_argv=None` skips the SSH-discovery path which
+    # would otherwise hang /api/miners for ~10s × len(rigs) on every request.
 ))
 
 
