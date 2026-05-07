@@ -123,6 +123,59 @@ download "rigel" \
     "https://github.com/rigelminer/rigel/releases/download/1.23.2/rigel-1.23.2-linux.tar.gz" \
     "rigel"
 
+# tnn-miner (Tritonn204/tnn-miner) — CPU + Orochi GPU dispatch.
+# Upstream's only Linux GPU prebuild is AMD-ROCm; for NVIDIA we build the
+# unified Orochi target ourselves and host it on the CatStack release.
+# The bundle ships libnvrtc + builtins alongside the binary because the
+# Orochi runtime dlopens them and stock MeowOS rigs only have libcudart.
+download_tnn_miner() {
+    local TAG="v0.7.8"
+    local URL="https://github.com/Meowcoin-Foundation/CatStack/releases/download/tnn-miner-orochi-${TAG}/tnn-miner-orochi-linux-x86_64.tar.gz"
+    if [ "$TARGET" != "all" ] && [ "$TARGET" != "tnn-miner" ]; then return; fi
+    echo "  Downloading tnn-miner from $URL"
+    cd /tmp
+    rm -rf "dl-tnn-miner"; mkdir "dl-tnn-miner"; cd "dl-tnn-miner"
+    if ! wget -q --show-progress "$URL" -O archive 2>&1; then
+        echo "  FAILED: tnn-miner — wget error" >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-tnn-miner"
+        return
+    fi
+    local sz; sz=$(stat -c%s archive 2>/dev/null || wc -c < archive)
+    if [ "$sz" -lt 1024 ]; then
+        echo "  FAILED: tnn-miner — archive too small ($sz bytes; release likely not yet published)" >&2
+        head -c 200 archive >&2; echo >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-tnn-miner"
+        return
+    fi
+    tar xzf archive
+    # Tarball layout: tnn-miner-orochi/tnn-miner + tnn-miner-orochi/lib/libnvrtc*
+    local ROOT
+    ROOT=$(find . -name "tnn-miner" -type f -path "*/tnn-miner-orochi/*" | head -1)
+    if [ -z "$ROOT" ] || [ ! -s "$ROOT" ]; then
+        echo "  FAILED: tnn-miner — binary not found in archive" >&2
+        ls -la >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-tnn-miner"
+        return
+    fi
+    local BUNDLE_DIR
+    BUNDLE_DIR=$(dirname "$ROOT")
+    cp "$BUNDLE_DIR/tnn-miner" "$DEST/tnn-miner"
+    chmod +x "$DEST/tnn-miner"
+    # Install bundled CUDA-RTC libs to /opt/mfarm/miners/tnn-miner.libs/ and
+    # register that dir with ldconfig so the Orochi runtime can dlopen them.
+    rm -rf "$DEST/tnn-miner.libs"
+    mkdir -p "$DEST/tnn-miner.libs"
+    cp -P "$BUNDLE_DIR/lib/"* "$DEST/tnn-miner.libs/" 2>/dev/null || true
+    echo "/opt/mfarm/miners/tnn-miner.libs" > /etc/ld.so.conf.d/tnn-miner.conf
+    ldconfig 2>/dev/null || true
+    echo "  OK: $DEST/tnn-miner ($(ls -lh "$DEST/tnn-miner" | awk '{print $5}')) + libs in tnn-miner.libs/"
+    cd /tmp; rm -rf "dl-tnn-miner"
+}
+download_tnn_miner
+
 echo ""
 echo "=== Installed miners ==="
 ls -lh "$DEST/"

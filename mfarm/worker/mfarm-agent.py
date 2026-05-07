@@ -85,7 +85,7 @@ class Config:
         self.api_ports = {
             "ccminer": 4068, "trex": 4067, "lolminer": 44444,
             "cpuminer-opt": 4048, "xmrig": 44445, "miniz": 20000,
-            "rigel": 4067,
+            "rigel": 4067, "tnn-miner": 8989,
         }
         # Bearer token for the console push/poll transport. Absence of a
         # token disables the push client entirely (rig falls back to the
@@ -1075,6 +1075,49 @@ def query_srbminer_api(port: int) -> dict | None:
         return None
 
 
+def query_tnn_api(port: int) -> dict | None:
+    """Query tnn-miner via its --broadcast HTTP /stats endpoint.
+
+    Endpoint shape (from src/broadcast/broadcastServer.cpp):
+      { "hashrate": <total H/s>, "accepted": N, "rejected": N,
+        "uptime": <secs>, "algo": "...", "version": "...",
+        "cpu_hashrate": <H/s>?,
+        "gpus": [{"id": 0, "hashrate": <H/s>, "name": "...", "pcie_id": "..."}, ...] }
+    """
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/stats")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.read().decode())
+        conn.close()
+
+        gpu_stats = []
+        for g in data.get("gpus") or []:
+            try:
+                gpu_stats.append({
+                    "gpu_id": int(g.get("id", 0)),
+                    "hashrate": float(g.get("hashrate", 0) or 0),
+                })
+            except (ValueError, TypeError):
+                continue
+        gpu_stats.sort(key=lambda g: g["gpu_id"])
+
+        return {
+            "hashrate": float(data.get("hashrate", 0) or 0),
+            "accepted": int(data.get("accepted", 0) or 0),
+            "rejected": int(data.get("rejected", 0) or 0),
+            "algo": data.get("algo", ""),
+            "uptime_secs": int(data.get("uptime", 0) or 0),
+            "hashrate_units": "H/s",
+            "gpu_stats": gpu_stats,
+            "version": data.get("version", ""),
+        }
+    except Exception:
+        return None
+
+
 API_PARSERS = {
     "ccminer_tcp": query_ccminer_api,
     "trex_http": query_trex_api,
@@ -1084,6 +1127,7 @@ API_PARSERS = {
     "rigel_http": query_rigel_api,
     "kerrigan_log": query_kerrigan_log,
     "srbminer_http": query_srbminer_api,
+    "tnn_http": query_tnn_api,
 }
 
 # Miner name to API type mapping
@@ -1100,6 +1144,8 @@ MINER_API_TYPES = {
     "rigel": "rigel_http",
     "kerrigan": "kerrigan_log",
     "srbminer": "srbminer_http",
+    "tnn-miner": "tnn_http",
+    "tnn": "tnn_http",
 }
 
 
@@ -1241,6 +1287,8 @@ def _any_miner_process_alive(miner_name: str) -> bool:
         "trex": ["t-rex"],
         "cpuminer-opt": ["cpuminer"],
         "srbminer": ["SRBMiner-Multi"],
+        "tnn-miner": ["tnn-miner"],
+        "tnn": ["tnn-miner"],
     }.get(miner_name.lower(), [miner_name])
     for proc_dir in Path("/proc").iterdir():
         if not proc_dir.name.isdigit():
@@ -1383,6 +1431,32 @@ class MinerManager:
             launcher = binary if binary.endswith("multi_gpu.sh") else f"{binary}/multi_gpu.sh"
             cmd = [launcher, wallet, worker, host, port_str]
 
+        elif miner == "tnn-miner":
+            # tnn-miner uses `--<coin-symbol>` instead of `-a <algo>`. The
+            # flight sheet's `algo` field holds the tnn coin symbol (e.g.
+            # "lpepe", "xel-v3", "spr", "dero", "vrsc", "rvn", "kawpow") —
+            # see the supported_algos list in mfarm/miners/registry.py.
+            # Daemon URL and stratum port are passed separately via
+            # --daemon-address / --port; broadcast HTTP API is fixed at
+            # port 8989 (compile-time TNN_BROADCAST_PORT).
+            import re
+            coin_flag = algo if algo.startswith("--") else f"--{algo}"
+            m = re.match(r"^((?:stratum\+(?:tcp|ssl)://)?)([^:]+):(\d+)$", pool)
+            if m:
+                daemon = f"{m.group(1)}{m.group(2)}"
+                stratum_port = m.group(3)
+            else:
+                daemon = pool
+                stratum_port = ""
+            wallet_worker = f"{wallet}.{worker}" if worker else wallet
+            cmd = [binary, coin_flag,
+                   "--daemon-address", daemon,
+                   "--wallet", wallet_worker,
+                   "--password", password,
+                   "--broadcast"]
+            if stratum_port:
+                cmd += ["--port", stratum_port]
+
         else:
             # Generic fallback
             wallet_worker = f"{wallet}.{worker}"
@@ -1471,6 +1545,7 @@ class MinerManager:
         "t-rex", "trex", "gminer", "miner", "nbminer", "teamredminer",
         "phoenixminer", "ethminer", "kawpowminer", "wildrig-multi",
         "kerrigan_v4",  # our custom Equihash192,7 miner
+        "tnn-miner",    # Tritonn204/tnn-miner — Orochi GPU + CPU
     ]
     # CPU miner binary names (kept alive during dual mining)
     CPU_MINER_BINARIES = ["xmrig", "cpuminer", "cpuminer-opt"]

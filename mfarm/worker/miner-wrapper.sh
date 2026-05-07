@@ -109,6 +109,33 @@ case "$MINER" in
         fi
         exec "$BINARY" "$WALLET" "$WORKER" "$HOST" "$PORT"
         ;;
+    tnn-miner|tnn)
+        # tnn-miner uses --<coin-symbol> instead of -a, and splits the daemon
+        # URL from the stratum port. The flight sheet's `algo` field carries
+        # the tnn coin symbol (e.g. "lpepe", "xel-v3", "spr"); pass with `--`
+        # prefix unless the user already prefixed it. Broadcast HTTP API is
+        # fixed at compile time (TNN_BROADCAST_PORT=8989).
+        case "$ALGO" in
+            --*) COIN_FLAG="$ALGO" ;;
+            *)   COIN_FLAG="--$ALGO" ;;
+        esac
+        # Split "scheme://host:port" or "host:port" into daemon + port
+        if [[ "$POOL" =~ ^((stratum\+(tcp|ssl)://)?)([^:]+):([0-9]+)$ ]]; then
+            DAEMON="${BASH_REMATCH[1]}${BASH_REMATCH[4]}"
+            STRATUM_PORT="${BASH_REMATCH[5]}"
+        else
+            DAEMON="$POOL"
+            STRATUM_PORT=""
+        fi
+        EXTRA_PORT_ARGS=()
+        [[ -n "$STRATUM_PORT" ]] && EXTRA_PORT_ARGS=(--port "$STRATUM_PORT")
+        exec "$BINARY" "$COIN_FLAG" \
+            --daemon-address "$DAEMON" \
+            --wallet "$WALLET.$WORKER" \
+            --password "$PASSWORD" \
+            --broadcast \
+            "${EXTRA_PORT_ARGS[@]}" $EXTRA_ARGS
+        ;;
     *)
         echo "Unknown miner: $MINER"
         exit 1

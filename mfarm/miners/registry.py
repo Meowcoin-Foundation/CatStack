@@ -360,6 +360,34 @@ _register(MinerDefinition(
 
 
 _register(MinerDefinition(
+    name="tnn-miner",
+    display_name="tnn-miner",
+    binary_name="tnn-miner",
+    # tnn-miner uses --<coin-symbol> rather than -a algo, so the algo field
+    # holds the coin symbol. Symbols come from the README at
+    # github.com/Tritonn204/tnn-miner — keep this in sync with new releases.
+    supported_algos=[
+        "dero",
+        "xel-v3", "xel-v2", "xel",
+        "spr",
+        "rx0", "xmr", "sal", "zeph", "xtm",
+        "vrsc",
+        "aix", "nxl", "htn", "wala", "shai", "rin",
+        "advc", "tdc", "ytn", "gold", "mtbc", "mgpc",
+        "urx", "crnc", "ysc", "eqpay", "lpepe",
+        "kawpow", "rvn", "quai",
+    ],
+    gpu_type="any",  # Orochi runtime — supports both NVIDIA (CUDA) and AMD (HIP)
+    api_type="tnn_http",
+    default_api_port=8989,
+    supports_solo=False,
+    # `--help` writes the option block to stdout; coin-symbol list is in
+    # README rather than --help, so we rely on the supported_algos fallback.
+    algo_query_argv=["--help"],
+))
+
+
+_register(MinerDefinition(
     name="rigel",
     display_name="Rigel",
     binary_name="rigel",
