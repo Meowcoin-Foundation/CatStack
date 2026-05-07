@@ -76,7 +76,9 @@ case "$MINER" in
         exec "$BINARY" --algo "$ALGO" --pool "$POOL" --user "$WALLET.$WORKER" \
             --pass "$PASSWORD" --apiport="$API_PORT" $EXTRA_ARGS
         ;;
-    xmrig)
+    xmrig|xmrig-rabid)
+        # xmrig-rabid is rabidmining/xmrig-rabid — fully xmrig-CLI-compatible
+        # fork that adds gr-rabid + randomx/graft. Same flags as upstream.
         # --log-file + --http-access-token match the agent's direct-launch path
         # so CPU-slot XMRig behaves identically to GPU-slot XMRig for logging
         # and API access. Without these, miner.log stays empty and the

@@ -84,8 +84,8 @@ class Config:
         self.miner_paths = {}
         self.api_ports = {
             "ccminer": 4068, "trex": 4067, "lolminer": 44444,
-            "cpuminer-opt": 4048, "xmrig": 44445, "miniz": 20000,
-            "rigel": 4067, "tnn-miner": 8989,
+            "cpuminer-opt": 4048, "xmrig": 44445, "xmrig-rabid": 44446,
+            "miniz": 20000, "rigel": 4067, "tnn-miner": 8989,
         }
         # Bearer token for the console push/poll transport. Absence of a
         # token disables the push client entirely (rig falls back to the
@@ -1139,6 +1139,7 @@ MINER_API_TYPES = {
     "t-rex": "trex_http",
     "lolminer": "lolminer_http",
     "xmrig": "xmrig_http",
+    "xmrig-rabid": "xmrig_http",
     "miniz": "miniz_http",
     "miniZ": "miniz_http",
     "rigel": "rigel_http",
@@ -1284,6 +1285,7 @@ def _any_miner_process_alive(miner_name: str) -> bool:
         "miniz": ["miniZ"],
         "ccminer": ["ccminer"],
         "xmrig": ["xmrig"],
+        "xmrig-rabid": ["xmrig-rabid"],
         "trex": ["t-rex"],
         "cpuminer-opt": ["cpuminer"],
         "srbminer": ["SRBMiner-Multi"],
@@ -1380,13 +1382,15 @@ class MinerManager:
                    "--user", wallet_worker, "--pass", password,
                    f"--apiport={port}"]
 
-        elif miner == "xmrig":
+        elif miner in ("xmrig", "xmrig-rabid"):
             # --no-color: keep miner.log readable by the dashboard.
             # --log-file: XMRig buffers stdout unreliably, so route logging
             # directly to miner.log where agent + UI expect it.
             # --http-access-token: matches the "Bearer meowfarm" the agent's
             # query_xmrig_api sends. Without it the API returns 401 and the
             # dashboard can't read hashrate.
+            # xmrig-rabid is rabidmining/xmrig-rabid — upstream xmrig fork
+            # adding gr-rabid + randomx/graft. CLI is fully xmrig-compatible.
             wallet_worker = f"{wallet}.{worker}"
             cmd = [binary, "-a", algo, "-o", pool, "-u", wallet_worker,
                    "-p", password, f"--http-host=0.0.0.0", f"--http-port={port}",
@@ -1548,7 +1552,7 @@ class MinerManager:
         "tnn-miner",    # Tritonn204/tnn-miner — Orochi GPU + CPU
     ]
     # CPU miner binary names (kept alive during dual mining)
-    CPU_MINER_BINARIES = ["xmrig", "cpuminer", "cpuminer-opt"]
+    CPU_MINER_BINARIES = ["xmrig", "xmrig-rabid", "cpuminer", "cpuminer-opt"]
 
     def _kill_stale_miners(self, keep_cpu: bool = False):
         """Kill any leftover miner processes not managed by this agent.

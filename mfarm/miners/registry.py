@@ -299,6 +299,33 @@ _register(MinerDefinition(
 
 
 _register(MinerDefinition(
+    name="xmrig-rabid",
+    display_name="XMRig-Rabid",
+    # rabidmining/xmrig-rabid — upstream xmrig fork that adds gr-rabid
+    # (GhostRider for Rabidcoin) and randomx/graft. Fully CLI-compatible
+    # with stock xmrig, so we reuse query_xmrig_api for the HTTP /summary
+    # parser and the same build_command branch.
+    binary_name="xmrig-rabid",
+    supported_algos=[
+        # Rabid-specific
+        "gr-rabid", "ghostrider-rabid",
+        "randomx/graft", "rx/graft",
+        # All upstream xmrig algos
+        "randomx", "rx/0", "rx/wow", "rx/arq", "rx/sfx", "rx/yada", "rx/v2",
+        "kawpow",
+        "cn/r", "cn/0", "cn/1", "cn/2", "cn/double", "cn/half", "cn/fast",
+        "cn-heavy/xhv", "cn-heavy/tube", "cn-heavy/0",
+        "argon2/chukwa", "argon2/chukwav2", "argon2/ninja", "argon2/wrkz",
+        "ghostrider",
+    ],
+    gpu_type="cpu",
+    api_type="xmrig_http",
+    default_api_port=44446,
+    supports_solo=False,
+))
+
+
+_register(MinerDefinition(
     name="miniz",
     display_name="miniZ",
     binary_name="miniZ",

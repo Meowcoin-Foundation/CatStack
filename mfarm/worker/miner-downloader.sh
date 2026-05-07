@@ -128,6 +128,59 @@ download "rigel" \
 # unified Orochi target ourselves and host it on the CatStack release.
 # The bundle ships libnvrtc + builtins alongside the binary because the
 # Orochi runtime dlopens them and stock MeowOS rigs only have libcudart.
+# xmrig-rabid (rabidmining/xmrig-rabid) — upstream xmrig fork that adds
+# gr-rabid (GhostRider for Rabidcoin) and randomx/graft. The HiveOS bundle
+# ships the binary plus libssl/libcrypto/libhwloc/libudev in lib/ so it
+# works on stock MeowOS without ldd matching. We install libs into
+# xmrig-rabid.libs/ and register them with ldconfig the same way we do
+# for tnn-miner's libnvrtc bundle.
+download_xmrig_rabid() {
+    local TAG="v6.26.3-rabid"
+    local VER="6.26.3"
+    local URL="https://gitlab.com/api/v4/projects/81073769/packages/generic/xmrig-rabid/${TAG}/xmrig-rabid-${VER}.tar.gz"
+    if [ "$TARGET" != "all" ] && [ "$TARGET" != "xmrig-rabid" ]; then return; fi
+    echo "  Downloading xmrig-rabid from $URL"
+    cd /tmp
+    rm -rf "dl-xmrig-rabid"; mkdir "dl-xmrig-rabid"; cd "dl-xmrig-rabid"
+    if ! wget -q --show-progress "$URL" -O archive 2>&1; then
+        echo "  FAILED: xmrig-rabid — wget error" >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-xmrig-rabid"
+        return
+    fi
+    local sz; sz=$(stat -c%s archive 2>/dev/null || wc -c < archive)
+    if [ "$sz" -lt 1024 ]; then
+        echo "  FAILED: xmrig-rabid — archive too small ($sz bytes)" >&2
+        head -c 200 archive >&2; echo >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-xmrig-rabid"
+        return
+    fi
+    tar xzf archive
+    # Tarball layout: xmrig-rabid/xmrig-rabid + xmrig-rabid/lib/lib{ssl,crypto,hwloc,udev}*
+    local ROOT
+    ROOT=$(find . -name "xmrig-rabid" -type f -path "*/xmrig-rabid/*" | head -1)
+    if [ -z "$ROOT" ] || [ ! -s "$ROOT" ]; then
+        echo "  FAILED: xmrig-rabid — binary not found in archive" >&2
+        ls -la >&2
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        cd /tmp; rm -rf "dl-xmrig-rabid"
+        return
+    fi
+    local BUNDLE_DIR
+    BUNDLE_DIR=$(dirname "$ROOT")
+    cp "$BUNDLE_DIR/xmrig-rabid" "$DEST/xmrig-rabid"
+    chmod +x "$DEST/xmrig-rabid"
+    rm -rf "$DEST/xmrig-rabid.libs"
+    mkdir -p "$DEST/xmrig-rabid.libs"
+    cp -P "$BUNDLE_DIR/lib/"* "$DEST/xmrig-rabid.libs/" 2>/dev/null || true
+    echo "/opt/mfarm/miners/xmrig-rabid.libs" > /etc/ld.so.conf.d/xmrig-rabid.conf
+    ldconfig 2>/dev/null || true
+    echo "  OK: $DEST/xmrig-rabid ($(ls -lh "$DEST/xmrig-rabid" | awk '{print $5}')) + libs in xmrig-rabid.libs/"
+    cd /tmp; rm -rf "dl-xmrig-rabid"
+}
+download_xmrig_rabid
+
 download_tnn_miner() {
     local TAG="v0.7.8"
     local URL="https://github.com/Meowcoin-Foundation/CatStack/releases/download/tnn-miner-orochi-${TAG}/tnn-miner-orochi-linux-x86_64.tar.gz"
