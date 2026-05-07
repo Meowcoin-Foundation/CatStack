@@ -1,0 +1,16 @@
+[Unit]
+Description=MeowOS dpkg corruption auto-recovery
+DefaultDependencies=no
+After=local-fs.target
+Before=mfarm-agent.service multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mfarm/meowos-dpkg-health.sh
+RemainAfterExit=yes
+TimeoutStartSec=120
+StandardOutput=append:/var/log/mfarm/dpkg-health.log
+StandardError=append:/var/log/mfarm/dpkg-health.log
+
+[Install]
+WantedBy=multi-user.target

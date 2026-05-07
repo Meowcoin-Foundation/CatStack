@@ -301,6 +301,12 @@ chmod +x "$MNT/opt/mfarm/mfarm-agent.py" "$MNT/opt/mfarm/miner-wrapper.sh"
 cp "$SRC/mfarm/worker/fan_controller_cli" "$MNT/opt/mfarm/fan_controller_cli"
 chmod +x "$MNT/opt/mfarm/fan_controller_cli"
 
+# dpkg corruption auto-recovery — runs before mfarm-agent at boot.
+cp "$SRC/mfarm/worker/meowos-dpkg-health.sh" "$MNT/opt/mfarm/meowos-dpkg-health.sh"
+cp "$SRC/mfarm/worker/meowos-dpkg-health.service" "$MNT/etc/systemd/system/meowos-dpkg-health.service"
+chmod +x "$MNT/opt/mfarm/meowos-dpkg-health.sh"
+chroot "$MNT" systemctl enable meowos-dpkg-health.service 2>/dev/null || true
+
 cp "$SRC/mfarm/worker/xmrig-1gb-hugepages.service" "$MNT/etc/systemd/system/xmrig-1gb-hugepages.service"
 mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/xmrig-1gb-hugepages.service \

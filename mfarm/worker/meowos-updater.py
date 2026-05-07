@@ -155,6 +155,11 @@ def restart_services() -> None:
     subprocess.run(
         ["systemctl", "enable", "--now", "meowos-updater.timer"], check=False
     )
+    # New defensive units shipped via the bundle: enable them on first
+    # extraction so the rig benefits without needing the operator to
+    # manually `systemctl enable`. Idempotent.
+    for unit in ("meowos-dpkg-health.service",):
+        subprocess.run(["systemctl", "enable", unit], check=False)
 
 
 def main() -> int:
