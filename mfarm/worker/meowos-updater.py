@@ -25,7 +25,8 @@ CONSOLE_URL_FILE = "/var/run/mfarm/console_url"
 LOCAL_VERSION_FILE = "/opt/mfarm/VERSION"
 LOG_FILE = "/var/log/mfarm/updater.log"
 STAGING = "/tmp/mfarm-update-staging"
-ALLOWED_PREFIXES = ("opt/mfarm/", "etc/systemd/system/", "etc/profile.d/")
+ALLOWED_PREFIXES = ("opt/mfarm/", "etc/systemd/system/", "etc/profile.d/",
+                    "usr/local/bin/")
 
 # Services restarted after the file swap. The updater itself isn't restarted —
 # Linux keeps the old inode for the running process and the next timer fire
