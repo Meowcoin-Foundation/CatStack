@@ -339,6 +339,13 @@ async def get_rig_stats(name: str):
     if s.last_stats is not None and agent_state.stats_age(rig.id) < PUSH_STATS_TTL_SECS:
         return s.last_stats
 
+    # Skip SSH fallback when the rig has no host on file. Without this guard,
+    # paramiko spins for the full 10s watchdog window on an empty hostname
+    # and the dashboard endpoint hangs. A blank host means we lost track of
+    # this rig's IP — phonehome will repopulate it when the rig comes back.
+    if not rig.host:
+        return {}
+
     pool = get_pool()
     loop = asyncio.get_event_loop()
     try:
