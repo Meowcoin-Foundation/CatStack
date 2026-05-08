@@ -388,7 +388,15 @@ _LAST_FAN_REFRESH: float = 0.0
 # first (4 audible jumps / 180s, peaks at 2795 RPM) and the operator
 # could still hear them, so we tightened further.
 _FAN_REFRESH_INTERVAL = 0.5
-_FAN_OVERRIDES_PATH = Path("/var/run/mfarm/fan_overrides.json")
+# Persistent (NOT tmpfs). Earlier this lived under /var/run/mfarm/ so a
+# reboot would wipe operator-set fan speeds and the firmware's auto-curve
+# would slam fans back toward defPWM=255 — a real surprise after a power
+# blip. /etc/mfarm/ persists so a "set fan 0 to 50%" survives reboots and
+# the agent re-applies it before the firmware can override.
+_FAN_OVERRIDES_PATH = Path("/etc/mfarm/fan_overrides.json")
+# Legacy location — copied forward at agent startup so rigs upgrading from
+# the tmpfs-era code don't lose an active override on the upgrade reboot.
+_FAN_OVERRIDES_LEGACY_PATH = Path("/var/run/mfarm/fan_overrides.json")
 
 
 def _disable_fan_watchdog() -> None:
@@ -566,8 +574,23 @@ def _save_fan_overrides() -> None:
 
 
 def _load_fan_overrides() -> None:
-    """Restore manual overrides from disk on agent startup."""
+    """Restore manual overrides from disk on agent startup.
+
+    One-time migration: if the legacy tmpfs path still has a payload (rig
+    just rebooted into the new code while a tmpfs override was still
+    valid), promote it to the persistent path before reading. Subsequent
+    boots only consult the persistent path.
+    """
     global _FAN_OVERRIDES
+    if _FAN_OVERRIDES_LEGACY_PATH.exists() and not _FAN_OVERRIDES_PATH.exists():
+        try:
+            data = _FAN_OVERRIDES_LEGACY_PATH.read_text()
+            _FAN_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _FAN_OVERRIDES_PATH.write_text(data)
+            log.info("Migrated fan overrides from %s to %s",
+                     _FAN_OVERRIDES_LEGACY_PATH, _FAN_OVERRIDES_PATH)
+        except OSError as e:
+            log.warning("Fan override migration failed: %s", e)
     try:
         data = json.loads(_FAN_OVERRIDES_PATH.read_text())
         _FAN_OVERRIDES = {int(k): int(v) for k, v in data.items()}
@@ -1879,6 +1902,13 @@ class Agent:
         # behind our back.
         if _FAN_OVERRIDES:
             _disable_fan_watchdog()
+            # Apply each persisted override IMMEDIATELY (writes -d + -f) so
+            # the firmware's auto-curve doesn't get a free ~1s window after
+            # boot to spin fans up before the first refresh tick fires.
+            log.info("Applying %d persisted fan overrides at startup",
+                     len(_FAN_OVERRIDES))
+            for idx, pwm in list(_FAN_OVERRIDES.items()):
+                _fan_ctrl_set(idx, pwm)
 
         # Enable the push transport iff a token has been provisioned. No
         # token → push_client stays None → _stats_loop skips push, _poll_loop
