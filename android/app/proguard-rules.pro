@@ -1,0 +1,2 @@
+-keepattributes *Annotation*, InnerClasses
+-keep,allowoptimization,allowobfuscation class kotlinx.serialization.** { *; }

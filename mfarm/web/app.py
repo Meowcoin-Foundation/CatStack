@@ -21,6 +21,7 @@ from mfarm.ssh.pool import get_pool
 from mfarm.web import agent_state
 from mfarm.web.api import router as api_router, PUSH_STATS_TTL_SECS
 from mfarm.web.agent_api import router as agent_router
+from mfarm.web.auth import API_TOKEN, auth_middleware, authorize_websocket
 
 log = logging.getLogger(__name__)
 
@@ -462,6 +463,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MeowFarm Dashboard", lifespan=lifespan)
+app.middleware("http")(auth_middleware)
 app.include_router(api_router, prefix="/api")
 app.include_router(agent_router, prefix="/api/agent")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -474,6 +476,9 @@ async def index():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    if not authorize_websocket(ws):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     _ws_clients.add(ws)
 
